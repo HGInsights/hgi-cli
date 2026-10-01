@@ -13,7 +13,8 @@
 # team means that person's own pull requests can never merge).
 #
 # Configures:
-#   * secret scanning + push protection, Dependabot alerts and security updates, private vulnerability reporting
+#   * secret scanning + push protection, Dependabot alerts and security updates, private vulnerability reporting,
+#     read-only workflow token, and manual approval of workflow runs from outside contributors
 #   * ruleset "main protection": PR + 1 approving review + code owner review, required checks, no force push, no deletion, no bypass
 #   * ruleset "release tags": only <team-slug> may create, move or delete v* tags
 #   * environment "release": reviewers = <team-slug>, self-review forbidden, deployments limited to v* TAGS
@@ -111,6 +112,10 @@ upsert_ruleset() { # <name> <json>
 run "enable secret scanning and push protection" -X PATCH "repos/$repo" \
   -f 'security_and_analysis[secret_scanning][status]=enabled' \
   -f 'security_and_analysis[secret_scanning_push_protection][status]=enabled'
+run "workflow token read-only by default; Actions cannot approve pull requests" -X PUT "repos/$repo/actions/permissions/workflow" \
+  -f default_workflow_permissions=read -F can_approve_pull_request_reviews=false
+run "require approval before workflows run for all outside contributors" -X PUT "repos/$repo/actions/permissions/fork-pr-contributor-approval" \
+  -f approval_policy=all_external_contributors
 run "enable Dependabot alerts" -X PUT "repos/$repo/vulnerability-alerts"
 run "enable Dependabot security updates" -X PUT "repos/$repo/automated-security-fixes"
 run "enable private vulnerability reporting" -X PUT "repos/$repo/private-vulnerability-reporting"
