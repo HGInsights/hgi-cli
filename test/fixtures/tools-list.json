@@ -1,0 +1,64 @@
+{
+  "tools": [
+    {
+      "name": "search_companies",
+      "description": "Search companies.",
+      "annotations": { "readOnlyHint": true },
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "minLength": 1 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+          "industries": { "type": "array", "items": { "type": "string" } },
+          "filters": {
+            "type": "object",
+            "properties": {
+              "employees": {
+                "type": "object",
+                "properties": { "min": { "type": "integer" }, "max": { "type": "integer" } }
+              },
+              "country": { "enum": ["US", "GB", "DE"] }
+            }
+          },
+          "sort": {
+            "anyOf": [
+              { "type": "string", "enum": ["name", "size"] },
+              { "type": "object", "properties": { "field": { "type": "string" }, "desc": { "type": "boolean" } }, "required": ["field"] }
+            ]
+          }
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "company_enrich",
+      "description": "Enrich one company.",
+      "annotations": { "readOnlyHint": true },
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "identifier": {
+            "oneOf": [
+              { "type": "object", "properties": { "domain": { "type": "string" } }, "required": ["domain"], "additionalProperties": false },
+              { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"], "additionalProperties": false }
+            ]
+          },
+          "fields": { "type": ["array", "null"], "items": { "type": "string" } }
+        },
+        "required": ["identifier"]
+      }
+    },
+    {
+      "name": "phoenix_invoke_agent",
+      "description": "Run an agent.",
+      "annotations": { "readOnlyHint": false },
+      "inputSchema": { "type": "object", "properties": { "agent_id": { "type": "string", "format": "uuid" } }, "required": ["agent_id"] }
+    },
+    {
+      "name": "aggregated_tool",
+      "description": "No annotations.",
+      "inputSchema": { "type": "object", "properties": { "$ref_broken": { "$ref": "#/definitions/missing" } } }
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+# Every change needs a review from the maintainers, and the release machinery from them in particular.
+*                          @HGInsights/maintainers
+/.github/                  @HGInsights/maintainers
+/scripts/                  @HGInsights/maintainers
+/packaging/                @HGInsights/maintainers
+/npm-shrinkwrap.json       @HGInsights/maintainers

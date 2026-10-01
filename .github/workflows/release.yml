@@ -1,0 +1,394 @@
+name: Release
+
+# Tags:  vX.Y.Z       final release  -> signed binaries, GitHub release, npm `latest`, Homebrew tap PR
+#        vX.Y.Z-rc.N  rehearsal      -> same pipeline, GitHub *prerelease*, npm `next`, no tap PR
+# Manual dispatch is a DRY RUN: no secrets, ad-hoc signatures, nothing published anywhere.
+#
+# Trust boundaries (see docs/releasing.md):
+#   * build-* and package hold no secrets and install with --ignore-scripts.
+#   * npm-publish holds the OIDC publish credential and publishes the prebuilt, smoke-tested tarball.
+#   * attest holds the attestation credential and runs no repository code beyond checksum verification.
+#   * homebrew-pr holds the GitHub App credential for the tap and runs only the formula renderer.
+# Jobs that use secrets run in the `release` environment, which only `v*` tags may deploy to.
+# macOS binaries are ad-hoc signed only (not Developer ID signed or notarized); see docs/releasing.md.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: verify tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      kind: ${{ steps.meta.outputs.kind }}
+      public: ${{ steps.meta.outputs.public }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: meta
+        env:
+          IS_TAG: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+          TAG: ${{ github.ref_name }}
+          VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          set -euo pipefail
+          pkg="$(sed -n 's/^  "version": "\(.*\)",$/\1/p' package.json | head -n 1)"
+          if [ "$IS_TAG" = true ]; then
+            version="${TAG#v}"
+            [ "$version" = "$pkg" ] || { echo "tag $TAG does not match package.json version $pkg" >&2; exit 1; }
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "tagged commit is not on main" >&2; exit 1; }
+            [ "$VISIBILITY" = public ] || { echo "tagged releases require a public repository (use a manual dispatch for a dry run)" >&2; exit 1; }
+            case "$version" in *-rc.*) kind=rc ;; *) kind=final ;; esac
+          else
+            version="$pkg"
+            kind=dryrun
+          fi
+          {
+            echo "version=$version"
+            echo "kind=$kind"
+            echo "public=$([ "$VISIBILITY" = public ] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+          echo "releasing $version ($kind)"
+
+  build-linux:
+    name: build linux binaries
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: bash scripts/build-binaries.sh linux-x64 linux-arm64
+      - name: Full e2e suite against the linux-x64 binary
+        run: bash scripts/test-binary-e2e.sh dist-bin/hgi-linux-x64
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bin-linux
+          path: dist-bin/hgi-linux-*
+          if-no-files-found: error
+
+  build-darwin:
+    name: build darwin binaries (no secrets)
+    needs: verify
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: bash scripts/build-binaries.sh darwin-arm64 darwin-x64
+      - name: Full e2e suite against the darwin-arm64 binary
+        run: bash scripts/test-binary-e2e.sh dist-bin/hgi-darwin-arm64
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bin-darwin
+          path: dist-bin/hgi-darwin-*
+          if-no-files-found: error
+
+  package:
+    name: package release assets (no secrets)
+    needs: [verify, build-linux, build-darwin]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bin-linux
+          path: dist-bin
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bin-darwin
+          path: dist-bin
+      - name: Package release assets
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: bash scripts/package-release.sh "$VERSION" dist-bin release
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: release/*
+          if-no-files-found: error
+
+  smoke:
+    name: smoke (${{ matrix.target }}, packaged tarball)
+    needs: [verify, package]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, os: ubuntu-latest, publicOnly: false }
+          - { target: linux-arm64, os: ubuntu-24.04-arm, publicOnly: true }
+          - { target: darwin-x64, os: macos-15-intel, publicOnly: false }
+          - { target: darwin-arm64, os: macos-latest, publicOnly: false }
+    steps:
+      - name: skip arm Linux while the repository is private
+        id: gate
+        run: echo "run=${{ (!matrix.publicOnly || needs.verify.outputs.public == 'true') && 'true' || 'false' }}" >> "$GITHUB_OUTPUT"
+      - if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - if: steps.gate.outputs.run == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: release
+      - if: steps.gate.outputs.run == 'true'
+        name: Verify checksums and unpack the real tarball
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          (cd release && shasum -a 256 -c SHA256SUMS)
+          mkdir -p unpacked
+          tar -xzf "release/hgi-v$VERSION-$TARGET.tar.gz" -C unpacked
+          test -x unpacked/hgi || { echo "the executable bit did not survive packaging" >&2; exit 1; }
+          bash scripts/smoke-binary.sh unpacked/hgi
+      - if: steps.gate.outputs.run == 'true' && startsWith(matrix.target, 'darwin')
+        name: macOS binary carries an intact ad-hoc signature
+        run: |
+          set -euo pipefail
+          codesign --verify --strict --verbose=2 unpacked/hgi
+          codesign -dvv unpacked/hgi 2>&1 | grep -E 'Signature=adhoc'
+      - if: steps.gate.outputs.run == 'true' && matrix.target == 'linux-x64'
+        name: Node for the npm install check
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - if: steps.gate.outputs.run == 'true' && matrix.target == 'linux-x64'
+        name: Install the exact npm tarball into a clean prefix
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: bash scripts/smoke-install.sh "release/hginsights-hgi-$VERSION.tgz"
+
+  brew-install:
+    name: brew install (${{ matrix.os }}, local candidate formula)
+    needs: [verify, package, smoke]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: release
+      - name: Install the rendered formula from the local tarballs
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! command -v brew >/dev/null 2>&1; then eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"; fi
+          release="$PWD/release"
+          bash scripts/render-formula.sh "$VERSION" release/SHA256SUMS --local-dir "$release" > hgi.rb
+          brew tap-new --no-git local/hgi-test
+          mkdir -p "$(brew --repository local/hgi-test)/Formula"
+          cp hgi.rb "$(brew --repository local/hgi-test)/Formula/hgi.rb"
+          brew install local/hgi-test/hgi
+          brew test local/hgi-test/hgi
+          test "$(hgi --version)" = "$VERSION"
+          brew audit --formula local/hgi-test/hgi || echo "brew audit reported issues (informational for a local tap)"
+
+  attest:
+    name: attest build provenance
+    needs: [verify, package, smoke]
+    if: needs.verify.outputs.kind != 'dryrun' && needs.verify.outputs.public == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: release
+      - name: Verify checksums before attesting
+        run: cd release && sha256sum -c SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: 'release/*'
+
+  github-release:
+    name: create GitHub release
+    needs: [verify, package, smoke, brew-install, attest]
+    if: needs.verify.outputs.kind != 'dryrun'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: release
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          KIND: ${{ needs.verify.outputs.kind }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          ## Verify what you download
+
+          \`\`\`bash
+          sha256sum -c SHA256SUMS --ignore-missing
+          gh attestation verify hgi-$TAG-<os>-<arch>.tar.gz --repo $REPO
+          \`\`\`
+
+          Binaries: \`hgi-$TAG-darwin-arm64\`, \`darwin-x64\`, \`linux-x64\`, \`linux-arm64\` (.tar.gz).
+          An SBOM (CycloneDX) is attached. macOS binaries are not Developer ID signed or notarized: a tarball downloaded through a browser needs \`xattr -d com.apple.quarantine hgi\` once; Homebrew and npm installs are unaffected.
+          Install routes: \`brew install hginsights/tap/hgi\`, \`npm install -g @hginsights/hgi\`, or the tarballs below.
+          EOF
+          flags=()
+          [ "$KIND" = rc ] && flags+=(--prerelease)
+          gh release create "$TAG" release/* --repo "$REPO" --verify-tag --title "$TAG" --notes-file notes.md "${flags[@]}"
+
+  npm-publish:
+    name: publish to npm (provenance)
+    needs: [verify, github-release]
+    if: needs.verify.outputs.kind != 'dryrun' && needs.verify.outputs.public == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # Node 24 bundles npm 11; trusted publishing needs npm >= 11.5.1. Using the bundled npm means
+      # nothing is downloaded and executed next to the OIDC publish credential.
+      # No `registry-url` here on purpose: it makes setup-node write an .npmrc with a placeholder
+      # NODE_AUTH_TOKEN, which can make npm prefer token auth over the OIDC trusted-publishing
+      # exchange. The default registry is already https://registry.npmjs.org.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Require an npm that supports trusted publishing
+        run: |
+          set -euo pipefail
+          v="$(npm --version)"
+          [ "$(printf '%s\n11.5.1\n' "$v" | sort -V | head -n 1)" = 11.5.1 ] || { echo "npm $v is older than 11.5.1 and cannot do trusted publishing" >&2; exit 1; }
+          echo "npm $v"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: release
+      - name: Publish the prebuilt tarball (no install, no lifecycle scripts)
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          KIND: ${{ needs.verify.outputs.kind }}
+        run: |
+          set -euo pipefail
+          (cd release && sha256sum -c SHA256SUMS --ignore-missing)
+          tag=latest
+          [ "$KIND" = rc ] && tag=next
+          npm publish "release/hginsights-hgi-$VERSION.tgz" --provenance --access public --ignore-scripts --tag "$tag"
+
+  homebrew-pr:
+    name: open Homebrew tap PR
+    needs: [verify, github-release]
+    if: needs.verify.outputs.kind == 'final' && needs.verify.outputs.public == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: release
+      - name: Mint a short-lived token for the tap (GitHub App, tap repository only)
+        id: tap-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.TAP_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
+          owner: HGInsights
+          repositories: homebrew-tap
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: HGInsights/homebrew-tap
+          path: tap
+          token: ${{ steps.tap-token.outputs.token }}
+          persist-credentials: true
+      - name: Open the PR (never a direct push)
+        env:
+          GH_TOKEN: ${{ steps.tap-token.outputs.token }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          (cd release && sha256sum -c SHA256SUMS --ignore-missing)
+          bash scripts/render-formula.sh "$VERSION" release/SHA256SUMS > tap/Formula/hgi.rb
+          cd tap
+          git config user.name "hgi release bot"
+          git config user.email "noreply@hginsights.com"
+          branch="hgi-$VERSION"
+          git switch -c "$branch"
+          git add Formula/hgi.rb
+          git commit -m "hgi $VERSION"
+          git push origin "$branch"
+          gh pr create --repo HGInsights/homebrew-tap --base main --head "$branch" \
+            --title "hgi $VERSION" --body "Automated formula update for https://github.com/HGInsights/hgi-cli/releases/tag/v$VERSION. Checksums come from the attested SHA256SUMS of that release."

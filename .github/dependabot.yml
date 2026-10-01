@@ -1,0 +1,35 @@
+version: 2
+
+# Major version bumps are done by hand: a major bump of the toolchain (TypeScript, ESLint, Vitest) or of
+# a runtime dependency (undici, the MCP SDK) needs deliberate testing, and several majors proposed
+# together can be mutually incompatible. Dependabot proposes only minor and patch updates, grouped so
+# each ecosystem produces at most one pull request per week.
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      npm-minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "chore(ci)"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      actions-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]

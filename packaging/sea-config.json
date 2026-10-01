@@ -1,0 +1,7 @@
+{
+  "main": "build/sea/hgi.cjs",
+  "output": "build/sea/hgi.blob",
+  "disableExperimentalSEAWarning": true,
+  "useSnapshot": false,
+  "useCodeCache": false
+}

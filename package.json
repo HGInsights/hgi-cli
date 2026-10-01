@@ -1,0 +1,62 @@
+{
+  "name": "@hginsights/hgi",
+  "version": "0.1.0",
+  "description": "Command-line client for the HG Insights MCP server, built for AI coding agents and GTM engineers.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "hgi": "dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "skills",
+    "README.md",
+    "LICENSE",
+    "docs",
+    "npm-shrinkwrap.json"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "scripts": {
+    "build": "node scripts/gen-skill-md.mjs && tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:unit": "vitest run test/unit",
+    "test:e2e": "npm run build && vitest run test/e2e",
+    "check": "npm run typecheck && npm run lint && npm test",
+    "smoke:install": "bash scripts/smoke-install.sh",
+    "prepack": "npm run build",
+    "gen:skill": "node scripts/gen-skill-md.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HGInsights/hgi-cli.git"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "commander": "^15.0.0",
+    "proper-lockfile": "^4.1.2",
+    "undici": "^8.11.2",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@types/node": "^22.0.0",
+    "@types/proper-lockfile": "^4.1.4",
+    "eslint": "^9.0.0",
+    "postject": "1.0.0-alpha.6",
+    "tsup": "^8.5.1",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^3.0.0"
+  }
+}

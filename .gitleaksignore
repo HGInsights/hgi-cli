@@ -1,0 +1,8 @@
+# Fake token strings used as fixtures by the redaction tests (test/unit/redact-errors.test.ts:13 and
+# test/unit/validate-result.test.ts:118). They exist in earlier commits, before the inline
+# `gitleaks:allow` markers were added. Each entry is one exact commit:file:rule:line fingerprint,
+# so a new finding anywhere else, including in these same files, is still reported.
+42e1f8aff4642ceeac41a1ecb7b21f2fa2037885:test/unit/redact-errors.test.ts:generic-api-key:13
+42e1f8aff4642ceeac41a1ecb7b21f2fa2037885:test/unit/validate-result.test.ts:generic-api-key:118
+b28322ee921a47d2f3124b97e316ec1cb0f9b07c:test/unit/validate-result.test.ts:generic-api-key:118
+fa13b37cd45082b9054a63227a6d90f8eb451047:test/unit/redact-errors.test.ts:generic-api-key:13

@@ -1,0 +1,41 @@
+class Hgi < Formula
+  desc "Command-line client for the HG Insights MCP server"
+  homepage "https://github.com/HGInsights/hgi-cli"
+  version "@VERSION@"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/HGInsights/hgi-cli/releases/download/v@VERSION@/hgi-v@VERSION@-darwin-arm64.tar.gz"
+      sha256 "@SHA256_DARWIN_ARM64@"
+    end
+    on_intel do
+      url "https://github.com/HGInsights/hgi-cli/releases/download/v@VERSION@/hgi-v@VERSION@-darwin-x64.tar.gz"
+      sha256 "@SHA256_DARWIN_X64@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/HGInsights/hgi-cli/releases/download/v@VERSION@/hgi-v@VERSION@-linux-arm64.tar.gz"
+      sha256 "@SHA256_LINUX_ARM64@"
+    end
+    on_intel do
+      url "https://github.com/HGInsights/hgi-cli/releases/download/v@VERSION@/hgi-v@VERSION@-linux-x64.tar.gz"
+      sha256 "@SHA256_LINUX_X64@"
+    end
+  end
+
+  # The binary is a signed single-executable application. Stripping or relinking it would remove the
+  # embedded program and invalidate the macOS signature, so Homebrew must leave it byte-for-byte alone.
+  skip_clean "bin/hgi"
+
+  def install
+    bin.install "hgi"
+    doc.install "LICENSE", "THIRD_PARTY_NOTICES", "NODE_LICENSE"
+  end
+
+  test do
+    assert_equal version.to_s, shell_output("#{bin}/hgi --version").strip
+  end
+end
