@@ -46,7 +46,7 @@ export interface LoggedRequest {
 }
 
 const USER = { id: 'user-1', name: 'Test User', email: 'test@example.com' };
-const ORG = { slug: 'madkudu', name: 'MadKudu' };
+const ORG = { slug: 'example-org', name: 'Example Org' };
 
 export class FakeServer {
   base = '';

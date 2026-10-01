@@ -39,7 +39,7 @@ function seed(opts: { ttlSec?: number; expiresAt?: number } = {}): { creds: Cred
     scope: 'mcp:read mcp:tools offline_access',
     obtained_at: Date.now(),
     user: { id: 'user-1', name: 'Test User', email: 'test@example.com' },
-    organization: { slug: 'madkudu', name: 'MadKudu' },
+    organization: { slug: 'example-org', name: 'Example Org' },
   };
   writeCredentials(credPath, creds);
   return { creds, session };
