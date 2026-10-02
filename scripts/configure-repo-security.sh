@@ -16,8 +16,10 @@
 #   * secret scanning + push protection, Dependabot alerts and security updates, private vulnerability reporting,
 #     read-only workflow token, and manual approval of workflow runs from outside contributors
 #   * ruleset "main protection": PR + 1 approving review + code owner review, required checks, no force push, no deletion, no bypass
-#   * ruleset "release tags": only <team-slug> may create, move or delete v* tags
-#   * environment "release": reviewers = <team-slug>, self-review forbidden, deployments limited to v* TAGS
+#   * ruleset "release tags": only the repository `maintain` role (and admins) may create, move or delete v* tags.
+#     GitHub rejects a team as a ruleset bypass actor on this plan, so <team-slug> is granted the `maintain`
+#     role on the repository instead and the bypass is by role
+#   * environment "release": reviewers = the members of <team-slug>, self-review forbidden, deployments limited to v* TAGS
 #     (a branch named v1.2.3 must not match); any other existing deployment policy is removed
 set -euo pipefail
 
@@ -86,10 +88,12 @@ main_ruleset="$(jq -n --argjson checks "$required_checks" '{
       strict_required_status_checks_policy: true, required_status_checks: $checks}}
   ]}')"
 
-tag_ruleset="$(jq -n --argjson team "$team_id" '{
+# RepositoryRole actor ids (built-in roles): read=1, write=2, triage=3, maintain=4, admin=5.
+# A bypass for `maintain` also covers admins.
+tag_ruleset="$(jq -n '{
   name: "release tags", target: "tag", enforcement: "active",
   conditions: {ref_name: {include: ["refs/tags/v*"], exclude: []}},
-  bypass_actors: [{actor_id: $team, actor_type: "Team", bypass_mode: "always"}],
+  bypass_actors: [{actor_id: 4, actor_type: "RepositoryRole", bypass_mode: "always"}],
   rules: [{type: "creation"}, {type: "update"}, {type: "deletion"}]}')"
 
 run() { # <description> <gh api args...>
@@ -120,11 +124,17 @@ run "enable Dependabot alerts" -X PUT "repos/$repo/vulnerability-alerts"
 run "enable Dependabot security updates" -X PUT "repos/$repo/automated-security-fixes"
 run "enable private vulnerability reporting" -X PUT "repos/$repo/private-vulnerability-reporting"
 
+run "grant team '$team' the maintain role on $repo (needed to push v* tags)" -X PUT "orgs/$org/teams/$team/repos/$repo" -f permission=maintain
+
 upsert_ruleset "main protection" "$main_ruleset"
 upsert_ruleset "release tags" "$tag_ruleset"
 
-run "create/update environment 'release' (reviewers: $team)" -X PUT "repos/$repo/environments/release" --input - <<<"$(jq -n --argjson team "$team_id" '{
-  reviewers: [{type: "Team", id: $team}], prevent_self_review: true,
+# GitHub drops a team given as an environment reviewer on this plan (the list comes back empty), so the
+# team's members are set as individual reviewers.
+member_ids="$(gh api "orgs/$org/teams/$team/members" --paginate --jq '.[].id')"
+reviewers_json="$(printf '%s\n' "$member_ids" | jq -Rn '[inputs | select(length > 0) | {type: "User", id: (. | tonumber)}]')"
+run "create/update environment 'release' (reviewers: members of $team, self-review forbidden)" -X PUT "repos/$repo/environments/release" --input - <<<"$(jq -n --argjson reviewers "$reviewers_json" '{
+  reviewers: $reviewers, prevent_self_review: true,
   deployment_branch_policy: {protected_branches: false, custom_branch_policies: true}}')"
 policy_jq='.branch_policies[] | "\(.id) \(.type) \(.name)"'
 if $apply; then
