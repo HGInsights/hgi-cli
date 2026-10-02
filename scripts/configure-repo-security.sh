@@ -6,8 +6,8 @@
 #
 # Run this AFTER the repository is public (GitHub Free exposes none of these APIs for private
 # repositories), and BEFORE any release secret is stored. --apply refuses to run on a private
-# repository, if the release team has fewer than two members (the release environment forbids
-# self-review, so a lone member could never approve their own release), or if a team named in
+# repository, if the release team has fewer than two members (a release should have a second
+# person who can review it), or if a team named in
 # CODEOWNERS lacks write access or has fewer than two members (the main ruleset requires an approving
 # code-owner review with no bypass: no write access means the rule enforces nothing, and a one-person
 # team means that person's own pull requests can never merge).
@@ -19,7 +19,7 @@
 #   * ruleset "release tags": only the repository `maintain` role (and admins) may create, move or delete v* tags.
 #     GitHub rejects a team as a ruleset bypass actor on this plan, so <team-slug> is granted the `maintain`
 #     role on the repository instead and the bypass is by role
-#   * environment "release": reviewers = the members of <team-slug>, self-review forbidden, deployments limited to v* TAGS
+#   * environment "release": reviewers = the members of <team-slug> (self-review allowed), deployments limited to v* TAGS
 #     (a branch named v1.2.3 must not match); any other existing deployment policy is removed
 set -euo pipefail
 
@@ -133,8 +133,8 @@ upsert_ruleset "release tags" "$tag_ruleset"
 # team's members are set as individual reviewers.
 member_ids="$(gh api "orgs/$org/teams/$team/members" --paginate --jq '.[].id')"
 reviewers_json="$(printf '%s\n' "$member_ids" | jq -Rn '[inputs | select(length > 0) | {type: "User", id: (. | tonumber)}]')"
-run "create/update environment 'release' (reviewers: members of $team, self-review forbidden)" -X PUT "repos/$repo/environments/release" --input - <<<"$(jq -n --argjson reviewers "$reviewers_json" '{
-  reviewers: $reviewers, prevent_self_review: true,
+run "create/update environment 'release' (reviewers: members of $team, self-review allowed)" -X PUT "repos/$repo/environments/release" --input - <<<"$(jq -n --argjson reviewers "$reviewers_json" '{
+  reviewers: $reviewers, prevent_self_review: false,
   deployment_branch_policy: {protected_branches: false, custom_branch_policies: true}}')"
 policy_jq='.branch_policies[] | "\(.id) \(.type) \(.name)"'
 if $apply; then

@@ -61,15 +61,15 @@ case "$route" in
     ;;
   npm)
     mkdir -p "$work/prefix" "$work/project"
-    npm install --global --prefix "$work/prefix" --no-audit --no-fund "@hginsights/hgi@$version" >/dev/null
+    npm install --global --prefer-online --prefix "$work/prefix" --no-audit --no-fund "@hginsights/hgi@$version" >/dev/null
     export PATH="$work/prefix/bin:$PATH"
     pkgdir="$work/prefix/lib/node_modules/@hginsights/hgi"
     [ -f "$pkgdir/npm-shrinkwrap.json" ] && pass "package ships npm-shrinkwrap.json (tested dependency versions)" || fail "npm-shrinkwrap.json missing from the installed package"
     # `npm audit signatures` audits the dependencies of the PROJECT it runs in, so hgi must be a
     # dependency of a throwaway project (inside hgi's own directory it would audit only hgi's deps).
-    (cd "$work/project" && npm init -y >/dev/null && npm install --no-audit --no-fund "@hginsights/hgi@$version" >/dev/null)
+    (cd "$work/project" && npm init -y >/dev/null && npm install --prefer-online --no-audit --no-fund "@hginsights/hgi@$version" >/dev/null)
     if (cd "$work/project" && npm audit signatures >"$work/audit.txt" 2>&1); then pass "npm audit signatures: registry signatures verify for hgi and its dependencies"; else fail "npm audit signatures failed"; sed 's/^/      /' "$work/audit.txt"; fi
-    if npm view "@hginsights/hgi@$version" dist.attestations --json 2>/dev/null | jq -e '.provenance != null or .url != null' >/dev/null; then pass "the registry holds a provenance attestation for @hginsights/hgi@$version"; else fail "no provenance attestation on @hginsights/hgi@$version"; fi
+    if npm view --prefer-online "@hginsights/hgi@$version" dist.attestations --json 2>/dev/null | jq -e '.provenance != null or .url != null' >/dev/null; then pass "the registry holds a provenance attestation for @hginsights/hgi@$version"; else fail "no provenance attestation on @hginsights/hgi@$version"; fi
     ;;
   brew)
     command -v brew >/dev/null || { echo "Homebrew is not installed on this machine" >&2; exit 2; }
