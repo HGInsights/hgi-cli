@@ -1,6 +1,6 @@
 {
   "name": "@hginsights/hgi",
-  "version": "0.1.0-rc.1",
+  "version": "0.1.0-rc.2",
   "description": "Command-line client for the HG Insights MCP server, built for AI coding agents and GTM engineers.",
   "license": "MIT",
   "type": "module",

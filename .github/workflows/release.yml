@@ -207,6 +207,11 @@ jobs:
         env:
           VERSION: ${{ needs.verify.outputs.version }}
         run: bash scripts/smoke-install.sh "release/hginsights-hgi-$VERSION.tgz"
+      - if: steps.gate.outputs.run == 'true' && matrix.target == 'linux-x64'
+        name: npm accepts the tarball for publishing (dry run, before the approval gate)
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: npm publish "./release/hginsights-hgi-$VERSION.tgz" --dry-run --ignore-scripts --access public --tag next
 
   brew-install:
     name: brew install (${{ matrix.os }}, local candidate formula)
@@ -339,7 +344,8 @@ jobs:
           (cd release && sha256sum -c SHA256SUMS --ignore-missing)
           tag=latest
           [ "$KIND" = rc ] && tag=next
-          npm publish "release/hginsights-hgi-$VERSION.tgz" --provenance --access public --ignore-scripts --tag "$tag"
+          # The leading ./ matters: npm reads a bare "release/x.tgz" as a GitHub owner/repo shorthand.
+          npm publish "./release/hginsights-hgi-$VERSION.tgz" --provenance --access public --ignore-scripts --tag "$tag"
 
   homebrew-pr:
     name: open Homebrew tap PR
