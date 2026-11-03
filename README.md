@@ -4,8 +4,6 @@
 
 It is a thin client: it signs you in through your browser, then lists and runs the tools the server offers you. It never hard-codes the tool list.
 
-> **Status:** pre-release. The repository is private until the open-source release is approved.
-
 ## Install
 
 macOS and Linux only. Windows is not supported (`npm` refuses the install). Pick one route:
