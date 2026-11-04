@@ -8,3 +8,7 @@ coverage/
 sea-trial/
 dist-bin/
 build/
+
+# AI SDLC dev docs (per-issue plans, context, decisions), written by /fix-issue
+# and /task-to-github-issue. Local working files, never committed.
+dev/
