@@ -44,7 +44,7 @@ hgi run <tool> --input '{...}'                           # only after the user a
 - Output is JSON when piped and a table on a terminal. Use `-f json|jsonl|csv|yaml|table`.
 - `--select a,b.c` keeps only those fields (dotted paths work through arrays). Prefer it, or `--out <new file>`, for large results; results are never truncated.
 - `--meta` prints `{ "result": ..., "credit_cost": ..., "mcp_version": ... }` on stdout.
-- For more than one company, use `--ids @file` (one HG id or domain per line; `--ids -` for stdin; `--ids-column <name>` for a CSV) instead of looping. hgi batches by the tool's limit, sends batches one at a time, and prints `{"input", "result"}` or `{"input", "error"}` rows as JSONL in input order. Exit 3 means a batch failed (its rows carry the error, the rest are fine); any other non-zero exit stopped the run, and `details.rows_emitted` / `calls_made` say how far it got: keep the rows already printed and resume from there.
+- For more than one company, use `--ids @file` (one HG id or domain per line; `--ids -` for stdin; `--ids-column <name>` for a CSV; `--batch-size <n>` to send fewer per call than the tool's limit) instead of looping. hgi batches by the tool's limit, sends batches one at a time, and prints `{"input", "result"}` or `{"input", "error"}` rows as JSONL in input order. Exit 3 means a batch failed (its rows carry the error, the rest are fine); any other non-zero exit stopped the run, and `details.rows_emitted` / `calls_made` say how far it got: keep the rows already printed and resume from there.
 
 ## Exit codes
 

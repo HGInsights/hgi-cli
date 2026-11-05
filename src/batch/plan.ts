@@ -2,7 +2,7 @@ import { HgiError } from '../errors.js';
 import type { McpTool } from '../mcp/tools.js';
 import { classify, normalize, type IdKind, type IdLine } from './ids.js';
 
-export const DEFAULT_BATCH_SIZE = 25;
+const DEFAULT_BATCH_SIZE = 25;
 
 /** The batch fields hgi knows, by kind. Read from the input schema, never from the tool name. */
 const FIELD_FOR: Record<IdKind, 'hg_ids' | 'domains'> = { id: 'hg_ids', domain: 'domains' };
@@ -65,7 +65,6 @@ export interface UniqueInput {
   /** The first occurrence's trimmed text; this is what is sent. */
   text: string;
   norm: string;
-  batch: number;
 }
 
 export interface Batch {
@@ -97,7 +96,7 @@ export function buildBatches(input: IdLine[], fields: BatchFields, batchSize?: n
     const key = `${kind}:${norm}`;
     let unique = uniques.get(key);
     if (!unique) {
-      unique = { kind, text: line.text, norm, batch: -1, first: position };
+      unique = { kind, text: line.text, norm, first: position };
       uniques.set(key, unique);
     }
     lines.push({ text: line.text, unique });
@@ -122,7 +121,6 @@ export function buildBatches(input: IdLine[], fields: BatchFields, batchSize?: n
   }
   const firstOf = (b: Batch) => (b.items[0] as UniqueInput & { first: number }).first;
   chunks.sort((a, b) => firstOf(a) - firstOf(b));
-  chunks.forEach((b, index) => b.items.forEach((u) => (u.batch = index)));
   return { batches: chunks, lines };
 }
 
