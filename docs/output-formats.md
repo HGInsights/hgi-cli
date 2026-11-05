@@ -44,6 +44,24 @@ Results are never truncated. A large result prints complete in every format. Use
 
 `--select` trims the `result` inside the envelope, so `--meta --select name` gives `{"result": {"name": ...}, "credit_cost": ..., "mcp_version": ...}`.
 
+## `hgi call --ids` (batches)
+
+With `--ids`, `hgi call` prints **one row per input line, in input order**, instead of one result:
+
+```json
+{"input": "0a1b2c...", "result": {"company_id": "a1b2c...", "...": "..."}}
+{"input": "example.com", "error": {"code": "not_found", "message": "No company for this domain in the response."}}
+```
+
+- `input` is the line as you wrote it (trimmed). A duplicate line repeats its row at each position.
+- `result` is the matching entry from the tool's response: the response's single top-level array-of-objects property named by the tool's output schema, else its `companies` array. Id inputs match an entry's `company_id`, else `requested_hg_id`, else `organization_id`, compared lowercased with leading zeros removed. Domain inputs match `company_domain`, compared lowercased without scheme, leading `www.` or path.
+- `error.code` is `not_found` (the server left the input out), `unexpected_response` (the response has no array to match against), or the code of the failed batch call (for example `tool_error`). Error messages are redacted like every other `hgi` error.
+- **The default format is JSONL, on a terminal or not.** JSONL rows stream as each batch returns. `-f json` prints one array of rows; `-f csv|yaml|table` format the list of rows. Those, and `--out`, are written once when the run ends (or, on a fatal stop, with the rows so far).
+- `--select` trims each row's `result`; `input` and `error` are always kept.
+- **`--meta` does not wrap stdout** with `--ids`. stdout stays pure rows, and `--meta` adds one summary object on stderr at the end: `{"calls", "rows", "row_errors", "credit_cost", "calls_without_cost"}`. `credit_cost` sums the costs the calls reported; `calls_without_cost` counts calls that reported none, so the sum is a lower bound.
+- The credit line on stderr is printed once, with the total, at the end (and before a fatal error).
+- On a terminal, progress (`hgi: batch 3/40`) goes to stderr. It is never printed when stderr is not a terminal.
+
 ## `hgi tools list`
 
 `hgi tools list --json` prints `{base_url, mcp_version, server, fetched_at, from_cache, count, tools: [...]}`. Each tool has `name`, `verb` (`call` or `run`), `read_only` (`true`, `false` or `null` when the server gave no annotation), `description`, `required`, `parameters` and the full `input_schema`. The list is cached for 15 minutes per server, organization and user; `--refresh` asks the server. The served MCP version comes from the server (`X-MCP-Version`).
