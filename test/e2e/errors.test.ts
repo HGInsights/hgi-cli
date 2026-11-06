@@ -156,12 +156,64 @@ describe('Story 5: every failure has its own exit code and a stable JSON error',
         content: [{ type: 'text', text: 'Credit limit reached. Do not retry this tool call.' }],
         _meta: { errorCode: 'credit_limit_exceeded' },
       }));
-      expectError(await lookup(), 6, 'credit_limit_exceeded');
+      const org = expectError(await lookup(), 6, 'credit_limit_exceeded');
+      expect(org.hint).toMatch(/organization/);
+      expect(org.details).toMatchObject({ tool: 'company_lookup', server_error_code: 'credit_limit_exceeded' });
       server.handlers.set('company_lookup', () => ({
         isError: true,
         content: [{ type: 'text', text: 'credit_limit_exceeded: Do not retry this tool call.' }],
       }));
       expectError(await lookup(), 3, 'tool_error');
+    });
+  });
+
+  describe('server refusal codes (decided by _meta.errorCode, never by the message)', () => {
+    beforeEach(() => login(sb));
+    const refuse = (errorCode?: string, text = 'Refused by the server.') =>
+      server.handlers.set('company_lookup', () => ({
+        isError: true,
+        content: [{ type: 'text', text }],
+        ...(errorCode ? { _meta: { errorCode } } : {}),
+      }));
+
+    it('user_credit_limit_exceeded exits 6 and names the personal budget', async () => {
+      refuse('user_credit_limit_exceeded');
+      const err = expectError(await lookup(), 6, 'user_credit_limit_exceeded');
+      expect(err.hint).toMatch(/personal credit budget/);
+      expect(err.hint).toMatch(/retrying will not help/);
+      expect(err.details).toMatchObject({ tool: 'company_lookup', server_error_code: 'user_credit_limit_exceeded' });
+    });
+
+    it('governance_unavailable exits 7, marked retryable, and is not retried by hgi', async () => {
+      refuse('governance_unavailable');
+      const err = expectError(await lookup(), 7, 'governance_unavailable');
+      expect(err.details).toMatchObject({ retryable: true, outcome_unknown: false, server_error_code: 'governance_unavailable' });
+      expect(server.toolCalls()).toHaveLength(1);
+    });
+
+    it('tool_not_enabled_for_team exits 11', async () => {
+      refuse('tool_not_enabled_for_team');
+      const err = expectError(await lookup(), 11, 'tool_not_enabled_for_team');
+      expect(err.details).toMatchObject({ tool: 'company_lookup', server_error_code: 'tool_not_enabled_for_team' });
+    });
+
+    it('phoenix_account_required exits 4 with a sign-up or sign-in hint', async () => {
+      refuse('phoenix_account_required');
+      const err = expectError(await lookup(), 4, 'phoenix_account_required');
+      expect(err.hint).toMatch(/sign up/i);
+      expect(err.hint).toContain('hgi auth login');
+    });
+
+    it('message text naming a code, with no errorCode, stays tool_error', async () => {
+      refuse(undefined, 'user_credit_limit_exceeded governance_unavailable tool_not_enabled_for_team phoenix_account_required');
+      const err = expectError(await lookup(), 3, 'tool_error');
+      expect(err.details).toEqual({ tool: 'company_lookup' });
+    });
+
+    it('an unknown errorCode stays tool_error and carries server_error_code', async () => {
+      refuse('something_new');
+      const err = expectError(await lookup(), 3, 'tool_error');
+      expect(err.details).toEqual({ tool: 'company_lookup', server_error_code: 'something_new' });
     });
   });
 
