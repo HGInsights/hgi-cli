@@ -9,7 +9,7 @@ interface StatusOptions {
   out?: string;
 }
 
-export interface BudgetStatus {
+interface BudgetStatus {
   budget_id: string;
   spent: number;
   max: number | null;
@@ -19,7 +19,7 @@ export interface BudgetStatus {
 }
 
 /** `max` comes from the flag, else HGI_MAX_CREDITS, else the cap stored by the last capped call. */
-export function budgetStatus(state: BudgetState, activeMax: number | null): BudgetStatus {
+function budgetStatus(state: BudgetState, activeMax: number | null): BudgetStatus {
   const max = activeMax ?? state.max;
   return {
     budget_id: state.budget_id,

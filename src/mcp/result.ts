@@ -71,7 +71,7 @@ const REFUSALS: Readonly<Record<string, Refusal>> = {
   },
 };
 
-export function serverErrorCodeOf(result: CallToolResult): string | undefined {
+function serverErrorCodeOf(result: CallToolResult): string | undefined {
   const code = (result._meta as { errorCode?: unknown } | undefined)?.errorCode;
   return typeof code === 'string' ? code : undefined;
 }

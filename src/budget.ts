@@ -224,6 +224,8 @@ export async function recordSpend(id: string, max: number, cost: number | null, 
         max,
         updated_at: new Date(now).toISOString(),
       };
+      // A hostile cost can overflow the sum; never write a file the next call would reject as corrupt.
+      if (!isState(state, id)) throw new Error('the new total is not a valid count (the reported cost overflowed it).');
       writeState(lock, file, state);
       return state;
     });

@@ -96,6 +96,14 @@ describe('budget file', () => {
     expect(fs.readdirSync(budgetsDir(env)).filter((f) => f.endsWith('.json'))).toHaveLength(1);
   });
 
+  it('refuses to record a total that overflows, keeping the previous state', async () => {
+    await recordSpend('t', 5, Number.MAX_VALUE, env);
+    const before = fs.readFileSync(budgetPath('t', env), 'utf8');
+    expect((await caught(recordSpend('t', 5, Number.MAX_VALUE, env))).details?.kind).toBe('budget_write_failed');
+    expect(fs.readFileSync(budgetPath('t', env), 'utf8')).toBe(before);
+    expect(readBudget('t', env).spent).toBe(Number.MAX_VALUE);
+  });
+
   it('checkBudget refuses with exit 13 once spent reaches the cap', async () => {
     await expect(checkBudget('t', 0, env)).rejects.toMatchObject({ code: 'budget_exceeded', details: { spent: 0, max: 0, budget_id: 't' } });
     await recordSpend('t', 5, 4, env);
