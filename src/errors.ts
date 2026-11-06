@@ -15,6 +15,7 @@ export const EXIT = {
   WRONG_VERB: 10,
   FORBIDDEN: 11,
   LOCAL_STATE: 12,
+  BUDGET: 13,
 } as const;
 
 export type ErrorCode =
@@ -25,6 +26,11 @@ export type ErrorCode =
   | 'login_expired'
   | 'rate_limited'
   | 'credit_limit_exceeded'
+  | 'user_credit_limit_exceeded'
+  | 'governance_unavailable'
+  | 'tool_not_enabled_for_team'
+  | 'phoenix_account_required'
+  | 'budget_exceeded'
   | 'server_unreachable'
   | 'oauth_error'
   | 'network_proxy_tls'
@@ -40,6 +46,11 @@ export const ERROR_EXIT: Record<ErrorCode, number> = {
   login_expired: EXIT.LOGIN,
   rate_limited: EXIT.RATE_LIMITED,
   credit_limit_exceeded: EXIT.CREDIT,
+  user_credit_limit_exceeded: EXIT.CREDIT,
+  governance_unavailable: EXIT.UNREACHABLE,
+  tool_not_enabled_for_team: EXIT.FORBIDDEN,
+  phoenix_account_required: EXIT.LOGIN,
+  budget_exceeded: EXIT.BUDGET,
   server_unreachable: EXIT.UNREACHABLE,
   oauth_error: EXIT.OAUTH,
   network_proxy_tls: EXIT.NETWORK,

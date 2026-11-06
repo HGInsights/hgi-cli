@@ -133,3 +133,69 @@ describe('redaction happens before truncation of tool error text', () => {
     }
   });
 });
+
+describe('interpretResult: server refusal codes (decided by _meta.errorCode only)', () => {
+  const refuse = (errorCode: unknown, text = 'Refused.'): HgiError => {
+    try {
+      interpretResult({ isError: true, content: [{ type: 'text', text }], _meta: { errorCode } }, 'company_lookup');
+    } catch (err) {
+      return err as HgiError;
+    }
+    throw new Error('expected interpretResult to throw');
+  };
+
+  it.each([
+    ['credit_limit_exceeded', 'credit_limit_exceeded', 6],
+    ['user_credit_limit_exceeded', 'user_credit_limit_exceeded', 6],
+    ['governance_unavailable', 'governance_unavailable', 7],
+    ['tool_not_enabled_for_team', 'tool_not_enabled_for_team', 11],
+    ['phoenix_account_required', 'phoenix_account_required', 4],
+    ['something_new', 'tool_error', 3],
+  ])('%s → %s, exit %i, with details.tool and details.server_error_code', (server, code, exit) => {
+    const err = refuse(server);
+    expect(err.code).toBe(code);
+    expect(err.exitCode).toBe(exit);
+    expect(err.details?.tool).toBe('company_lookup');
+    expect(err.details?.server_error_code).toBe(server);
+  });
+
+  it('keeps the organization hint for credit_limit_exceeded', () => {
+    expect(refuse('credit_limit_exceeded').hint).toBe('Your organization has used its credit allowance. Contact your admin; retrying will not help.');
+  });
+
+  it('names the personal budget for user_credit_limit_exceeded and says retrying will not help', () => {
+    const hint = refuse('user_credit_limit_exceeded').hint ?? '';
+    expect(hint).toMatch(/personal credit budget/);
+    expect(hint).toMatch(/retrying will not help/);
+  });
+
+  it('marks governance_unavailable retryable, with nothing run', () => {
+    const err = refuse('governance_unavailable');
+    expect(err.details).toMatchObject({ retryable: true, outcome_unknown: false });
+    expect(err.hint).toMatch(/retry/i);
+  });
+
+  it('tells a phoenix_account_required user to sign up or sign in differently', () => {
+    const hint = refuse('phoenix_account_required').hint ?? '';
+    expect(hint).toMatch(/sign up/i);
+    expect(hint).toContain('hgi auth login');
+  });
+
+  it('never matches prose, a non-string code, or a prototype key', () => {
+    let err: HgiError | undefined;
+    try {
+      interpretResult({ isError: true, content: [{ type: 'text', text: 'governance_unavailable: user_credit_limit_exceeded' }] }, 'x');
+    } catch (e) {
+      err = e as HgiError;
+    }
+    expect(err?.code).toBe('tool_error');
+    expect(err?.details).toEqual({ tool: 'x' });
+    expect(refuse(42).code).toBe('tool_error');
+    expect(refuse(42).details).toEqual({ tool: 'company_lookup' });
+    for (const proto of ['toString', '__proto__', 'constructor', 'hasOwnProperty']) {
+      const e = refuse(proto);
+      expect(e.code).toBe('tool_error');
+      expect(e.details?.server_error_code).toBe(proto);
+    }
+  });
+});

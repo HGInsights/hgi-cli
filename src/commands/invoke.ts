@@ -4,7 +4,8 @@ import { HgiError, toHgiError } from '../errors.js';
 import { readInputFile } from '../output/out-file.js';
 import { mcpCacheKey } from './tools.js';
 import { toolsCachePath, writeToolsCache } from '../mcp/cache.js';
-import { interpretResult } from '../mcp/result.js';
+import { checkBudget, recordSpend, resolveBudgetId, resolveMaxCredits } from '../budget.js';
+import { creditCostOf, interpretResult } from '../mcp/result.js';
 import { openSession } from '../mcp/session.js';
 import { verbFor, type McpTool, type Verb } from '../mcp/tools.js';
 import { assertValidInput } from '../mcp/validate.js';
@@ -21,6 +22,7 @@ interface InvokeOptions {
   meta?: boolean;
   validate: boolean;
   timeout: string;
+  maxCredits?: string;
 }
 
 export function parseTimeoutMs(raw: string): number {
@@ -85,10 +87,30 @@ export function assertVerb(requested: Verb, tool: McpTool): void {
   });
 }
 
+/** The tool ran, but its spend could not be recorded: print the result to stdout (never only to --out), then exit 12. */
+async function failAfterBudgetWrite(cause: HgiError, value: unknown, opts: InvokeOptions, creditCost: number | null): Promise<never> {
+  try {
+    await emit(value, { format: opts.format });
+  } catch {
+    // stdout is gone too; the tool still ran, so keep the error below
+  } finally {
+    reportCredit(creditCost);
+  }
+  throw new HgiError('local_state_error', `The tool ran, but ${cause.message.replace(/^Could not/, 'hgi could not')}`, {
+    hint: 'The tool already ran and was billed; its result was printed to stdout. Do NOT re-run it. Check the budget with `hgi budget status`.',
+    details: { kind: 'budget_write_failed', tool_ran: true },
+    cause,
+  });
+}
+
 async function runInvoke(verb: Verb, toolName: string, opts: InvokeOptions, cmd: Command): Promise<void> {
   const input = await readInput(opts.input);
   preflightOutput({ format: opts.format, select: opts.select, out: opts.out, force: opts.force, allowForce: verb === 'run' });
   const timeoutMs = parseTimeoutMs(opts.timeout);
+  // The run cap applies to `hgi call` only. It is checked before credentials are read or anything is sent.
+  const maxCredits = verb === 'call' ? resolveMaxCredits(opts.maxCredits) : null;
+  const budgetId = maxCredits === null ? null : resolveBudgetId();
+  if (budgetId !== null && maxCredits !== null) await checkBudget(budgetId, maxCredits);
   const ctx = buildContext(cmd);
   const creds = ctx.tokens.loadCredentials();
   const session = await openSession(ctx, { timeoutMs });
@@ -112,11 +134,29 @@ async function runInvoke(verb: Verb, toolName: string, opts: InvokeOptions, cmd:
     if (opts.validate) assertValidInput(tool, input);
 
     const result = await session.callTool(toolName, input);
-    const outcome = interpretResult(result, toolName);
+    let budgetFailure: HgiError | null = null;
+    if (budgetId !== null && maxCredits !== null) {
+      try {
+        await recordSpend(budgetId, maxCredits, creditCostOf(result));
+      } catch (err) {
+        budgetFailure = toHgiError(err);
+      }
+    }
+    let outcome: ReturnType<typeof interpretResult>;
+    try {
+      outcome = interpretResult(result, toolName);
+    } catch (err) {
+      // A server refusal stays the error the caller acts on; a failed budget write is only flagged on it.
+      if (budgetFailure && err instanceof HgiError) {
+        throw new HgiError(err.code, err.message, { hint: err.hint, details: { ...err.details, budget_write_failed: true }, cause: err });
+      }
+      throw err;
+    }
     const selected = applySelect(outcome.value, opts.select);
     const value = opts.meta
       ? { result: selected, credit_cost: outcome.creditCost, mcp_version: session.state.mcpVersion }
       : selected;
+    if (budgetFailure) await failAfterBudgetWrite(budgetFailure, value, opts, outcome.creditCost);
     try {
       await emit(value, {
         format: opts.format,
@@ -151,7 +191,7 @@ export function registerInvokeCommands(program: Command): void {
     run: 'Run a tool that changes state or starts work. Fails for read-only tools.',
   };
   for (const verb of ['call', 'run'] as const) {
-    program
+    const command = program
       .command(`${verb} <tool>`)
       .description(describeVerb[verb])
       .option('--input <json>', 'tool arguments as a JSON object; @file or - reads a file or stdin')
@@ -163,5 +203,19 @@ export function registerInvokeCommands(program: Command): void {
       .option('--timeout <seconds>', 'per-request timeout', '120')
       .addOption(new Option('--no-validate', 'skip client-side schema validation (let the server judge the input)').hideHelp())
       .action((tool: string, opts: InvokeOptions, cmd: Command) => runInvoke(verb, tool, opts, cmd));
+    if (verb === 'call') {
+      command
+        .option('--max-credits <n>', 'stop this run once it has spent n credits (also $HGI_MAX_CREDITS; the flag wins)')
+        .addHelpText(
+          'after',
+          [
+            '',
+            'Run cap (client-side, on top of the server limits):',
+            '  --max-credits <n> / HGI_MAX_CREDITS  refuse the call, sending nothing (exit 13), once this run has spent n credits',
+            '  HGI_BUDGET_ID                        the run to count against (default: the parent process id, so one shell or script)',
+            '  `hgi budget status` shows the spend; `hgi budget reset` starts it over.',
+          ].join('\n'),
+        );
+    }
   }
 }
