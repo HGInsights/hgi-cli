@@ -5,8 +5,8 @@ import { filterRows, ledgerPath, parseBy, parseSince, readLedger, summarize, typ
 import { defaultFormat, parseFormat } from '../output/format.js';
 import { emit, preflightOutput } from './emit.js';
 
-export const LOCAL_ONLY_NOTICE = "Local to this machine: calls made by hgi here, not your organization's bill.";
-export const ZERO_COST_CELL = '0 (server cache or free tool)';
+const LOCAL_ONLY_NOTICE = "Local to this machine: calls made by hgi here, not your organization's bill.";
+const ZERO_COST_CELL = '0 (server cache or free tool)';
 const TABLE_FOOTNOTE = [
   'zero_cost_calls: calls the server reported as costing 0 credits (a server-side cache hit or a free tool).',
   'unknown_cost_calls: calls whose cost the server did not report; they are not counted in credits.',

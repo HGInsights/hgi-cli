@@ -25,10 +25,10 @@ export interface LedgerRecord {
   status: LedgerStatus;
 }
 
-export const LEDGER_FILE = 'ledger.jsonl';
+const LEDGER_FILE = 'ledger.jsonl';
 
 /** About 5 s in total (3.6 to 7 s with jitter): an append holds the lock for a few milliseconds. */
-export const LEDGER_LOCK_RETRIES: LockRetries = { retries: 9, factor: 1.5, minTimeout: 70, maxTimeout: 700, randomize: true };
+const LEDGER_LOCK_RETRIES: LockRetries = { retries: 9, factor: 1.5, minTimeout: 70, maxTimeout: 700, randomize: true };
 
 type Env = NodeJS.ProcessEnv;
 
@@ -109,7 +109,9 @@ function writeLine(file: string, buf: Buffer, lock: FileLockHandle): string | nu
     );
     const st = fs.fstatSync(fd);
     if (!st.isFile()) return 'not_regular_file';
-    if ((st.mode & 0o077) !== 0) {
+    // Exactly 0600: looser bits are removed, and a strict umask (0277, 0377) must not leave a file
+    // its owner cannot reopen for the next append or for `hgi usage`.
+    if ((st.mode & 0o777) !== 0o600) {
       try {
         fs.fchmodSync(fd, 0o600);
       } catch {
@@ -190,7 +192,7 @@ function readFailed(code: string, file: string, cause: unknown): HgiError {
 
 const isStringOrNull = (v: unknown): v is string | null => v === null || typeof v === 'string';
 
-export function parseLine(line: string): LedgerRecord | null {
+function parseLine(line: string): LedgerRecord | null {
   let value: unknown;
   try {
     value = JSON.parse(line);
@@ -313,7 +315,7 @@ export function parseSince(raw: string, now: number = Date.now()): number {
   throw badSince(raw);
 }
 
-export const BY_VALUES = ['tool', 'label', 'day', 'call'] as const;
+const BY_VALUES = ['tool', 'label', 'day', 'call'] as const;
 export type By = (typeof BY_VALUES)[number];
 export type SummaryBy = Exclude<By, 'call'>;
 
@@ -333,13 +335,13 @@ export function filterRows(rows: LedgerRecord[], host: string, sinceMs: number |
     .map(({ row }) => row);
 }
 
-export function localDay(ts: string): string {
+function localDay(ts: string): string {
   const d = new Date(ts);
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-export interface SummaryRow {
+interface SummaryRow {
   key: string | null;
   calls: number;
   credits: number;

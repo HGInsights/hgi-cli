@@ -76,7 +76,7 @@ Global: `--base-url`, `--debug` (tokens are always masked), `--json-errors`.
 
 The credit cost of each call is printed on stderr after it runs (`credit_cost: 3`). There is no price before the call.
 
-Each call that reaches the server is also recorded in a local credit ledger, and `hgi usage` sums it:
+Each call that gets a result back from the server (a success or a tool error) is also recorded in a local credit ledger, and `hgi usage` sums it. A call whose outcome is unknown (the connection failed after it was sent) has no result and is not recorded.
 
 ```bash
 hgi call company_enrich --input '{"domain":"acme.com"}' --label enrich

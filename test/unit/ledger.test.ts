@@ -211,6 +211,18 @@ describe('appendLedger', () => {
     expect(await appendLedger(file, rec())).toBeNull();
     expect(fs.statSync(file).mode & 0o777).toBe(0o600);
   });
+  it('a strict umask still leaves a 0600 file that later appends can reopen', async () => {
+    const file = path.join(dir, 'ledger.jsonl');
+    const old = process.umask(0o377);
+    try {
+      expect(await appendLedger(file, rec())).toBeNull();
+      expect(await appendLedger(file, rec())).toBeNull();
+    } finally {
+      process.umask(old);
+    }
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(readLedger(file)).toMatchObject({ status: 'ok', malformed: 0 });
+  });
   it('refuses a symlink and leaves its target untouched', async () => {
     const target = path.join(dir, 'target.txt');
     fs.writeFileSync(target, 'keep');
