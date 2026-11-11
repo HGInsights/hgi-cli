@@ -103,7 +103,9 @@ describe('SKILL.md (Story 10)', () => {
     expect(loop).toMatch(/\.max_results\.maximum[\s\S]*\.offset\.maximum/);
     expect(loop).toMatch(/while \[ "\$ids" != "\[\]" \]/);
     expect(loop).toMatch(/-gt "\$maxoff" \]; then echo "partial[^\n]*break; fi/);
-    expect(loop).toMatch(/\.installs_count == \$max and \$off \+ \$max < \.total_installs_count/);
+    expect(loop).toMatch(/\.installs_count == \$max and \$off \+ \$max < \.total_installs_count\) \| \.company_id\] \| sort'/);
+    expect(loop).toMatch(/dir=\$\(mktemp -d\)/);
+    expect(loop).not.toMatch(/> "tech-/);
   });
   it('takes limits from the schema, never quoting a number for them', () => {
     const recipes = section('## Recipes');

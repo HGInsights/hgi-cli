@@ -83,15 +83,16 @@ hgi call company_firmographic --input '{"hg_ids":["<id1>","<id2>"]}' --select co
 4. **Baseline:** large companies are active on about 70% of the ~20,000-topic catalogue (observed), so a raw topic count measures size, not interest. Compare the curated topics (`topic_ids`) with the company's own unfiltered summary. A summary with `topic_ids` counts only those topics. `fields:["summary"]` without a topic filter rejects `granularity` (422). When you request `fields:["topics"]`, pass `granularity:"global"`: the default is one row per state, which counts a topic several times.
 
 ```bash
-# technographics page loop; page size and offset maximum come from the schema
+# technographics page loop (needs jq); page size and offset maximum come from the schema
+dir=$(mktemp -d)   # a fresh directory per run, so concurrent runs never share files
 schema=$(hgi tools list --json | jq '.tools[] | select(.name=="company_technographic") | .input_schema.properties')
 max=$(jq '.max_results.maximum' <<<"$schema"); maxoff=$(jq '.offset.maximum' <<<"$schema")
 ids='["<id1>","<id2>"]'; off=0   # one sorted batch of at most hg_ids.maxItems ids
 while [ "$ids" != "[]" ]; do
   if [ "$off" -gt "$maxoff" ]; then echo "partial: offset maximum reached for $ids" >&2; break; fi
-  hgi call company_technographic --input "{\"hg_ids\":$ids,\"vendor_names\":[\"<vendor>\"],\"max_results\":$max,\"offset\":$off}" -f json > "tech-$off.json" || break
-  # next page only for companies that filled this page and are short of their stated total
-  ids=$(jq -c --argjson max "$max" --argjson off "$off" '[.companies[] | select(.installs_count == $max and $off + $max < .total_installs_count) | .company_id]' "tech-$off.json")
+  hgi call company_technographic --input "{\"hg_ids\":$ids,\"vendor_names\":[\"<vendor>\"],\"max_results\":$max,\"offset\":$off}" -f json > "$dir/tech-$off.json" || break
+  # next page only for companies that filled this page and are short of their stated total, sorted
+  ids=$(jq -c --argjson max "$max" --argjson off "$off" '[.companies[] | select(.installs_count == $max and $off + $max < .total_installs_count) | .company_id] | sort' "$dir/tech-$off.json")
   off=$((off + max))
 done
 hgi call company_intent --input '{"company_domain":"accor.com"}'
