@@ -24,9 +24,9 @@ interface UsageOptions {
 function forTable(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
   return rows.map((row) => {
     const out: Record<string, unknown> = { ...row };
-    for (const key of ['credits', 'credit_cost']) {
-      if (out[key] === 0) out[key] = ZERO_COST_CELL;
-    }
+    // Only a 0 the server actually reported: a group whose 0 comes from unknown-cost calls alone keeps a plain 0.
+    if (out.credit_cost === 0) out.credit_cost = ZERO_COST_CELL;
+    if (out.credits === 0 && typeof out.zero_cost_calls === 'number' && out.zero_cost_calls > 0) out.credits = ZERO_COST_CELL;
     if ('label' in out && out.label === null) out.label = '(none)';
     return out;
   });

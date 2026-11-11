@@ -352,7 +352,9 @@ describe('Story 5: honest numbers', () => {
       { tool: 'company_lookup', calls: 1, credits: 0, zero_cost_calls: 1, unknown_cost_calls: 0 },
     ]);
     const table = ok(await usage(['-f', 'table']));
-    expect(table.stdout).toContain('0 (server cache or free tool)');
+    expect(table.stdout).toMatch(/^company_lookup\s+1\s+0 \(server cache or free tool\)\s/m);
+    // A 0 that only comes from unknown-cost calls is not labeled as a cache hit or free tool.
+    expect(table.stdout).toMatch(/^aggregated_thing\s+1\s+0\s+0\s+1$/m);
     expect(table.stderr).toContain('zero_cost_calls:');
     expect(table.stderr).toContain('unknown_cost_calls:');
   });
