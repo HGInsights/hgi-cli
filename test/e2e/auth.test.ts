@@ -63,6 +63,50 @@ describe('Story 1: sign in once', () => {
   });
 });
 
+describe('Issue 23: a 403 at sign-in has a printed way out', () => {
+  function expectNoSecrets(output: string, extra: string[] = []): void {
+    const creds = readCreds(sb);
+    for (const secret of [creds.access_token, creds.refresh_token, server.lastVerifier, ...extra]) {
+      expect(secret.length).toBeGreaterThan(0);
+      expect(output).not.toContain(secret);
+    }
+    expect(output).not.toMatch(/code_[0-9a-f]{24}/);
+  }
+
+  it('the default flow prints the URL, the error fallback and a 403 line naming the configured server', async () => {
+    const res = await runCli(['auth', 'login'], sb.env);
+    expect(res.code, res.stderr).toBe(0);
+    expect(res.stderr).toMatch(/^ {2}http:\/\/127\.0\.0\.1:\d+\/oauth\/authorize\S+$/m);
+    expect(res.stderr).toContain('or the page shows an error');
+    expect(res.stderr).toContain('browser on this computer');
+    const forbidden = res.stderr.split('\n').find((l) => l.includes('403 Forbidden')) ?? '';
+    expect(forbidden).toContain('private window');
+    expect(forbidden).toContain(`cookies for ${new URL(server.base).host}`);
+    expect(forbidden).toContain(`sign in at ${server.base} first`);
+    expect(res.stderr).not.toContain('phoenix.hginsights.com');
+    expect((JSON.parse(res.stdout) as { base_url: string }).base_url).toBe(server.base);
+    expect(fs.existsSync(credentialsFile(sb))).toBe(true);
+    expectNoSecrets(res.stdout + res.stderr);
+  });
+
+  it('--no-browser prints the same 403 recovery for the browser the URL is opened in, and a pasted callback still logs in', async () => {
+    const live = startCli(['auth', 'login', '--no-browser'], sb.env);
+    const url = await live.waitForStderr(/(http:\/\/127\.0\.0\.1:\d+\/oauth\/authorize\S+)/);
+    await live.waitForStderr(/(Paste the callback URL)/);
+    const callback = (await fetch(url, { redirect: 'manual' })).headers.get('location') as string;
+    live.write(`${callback}\n`);
+    const res = await live.result();
+    expect(res.code, res.stderr).toBe(0);
+    expect(res.stderr).toContain('Copy that full URL from the address bar.');
+    const forbidden = res.stderr.split('\n').find((l) => l.includes('403 Forbidden')) ?? '';
+    expect(forbidden).toContain('in the browser you open it in');
+    expect(forbidden).toContain('private window');
+    expect(forbidden).toContain(`cookies for ${new URL(server.base).host}`);
+    expect(forbidden).toContain(`sign in at ${server.base} first`);
+    expectNoSecrets(res.stdout + res.stderr, [new URL(callback).searchParams.get('code') as string]);
+  });
+});
+
 describe('Story 7: sign in without a local browser', () => {
   async function startNoBrowser() {
     const live = startCli(['auth', 'login', '--no-browser'], sb.env);
