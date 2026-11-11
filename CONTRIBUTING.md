@@ -17,7 +17,7 @@ Node.js 22.19 or newer (the minimum `undici` requires). macOS and Linux.
 - **Every failure maps to a documented exit code** (`src/errors.ts`, `docs/exit-codes.md`). Add the code, the doc row and a test together.
 - **Do not retry a `tools/call` after it was sent** unless the failure is provably pre-dispatch (see `src/mcp/transport-fetch.ts`).
 - **Do not use the SDK's `Client.listTools()` / `callTool()`.** They install output-schema validators that fail after the tool already ran. Use `client.request(..., schema)` as `src/mcp/session.ts` does.
-- **No hard-coded tool names or lists.** Tool lists depend on the caller and the server version.
+- **No hard-coded tool names or lists.** Tool lists depend on the caller and the server version. The agent skill (`skills/hgi/SKILL.md`) may name tools as examples, provided it tells the agent to confirm them with `hgi tools list --json` and to skip and report a step whose tool is missing.
 - **Keep `hgi call` a lookup-only verb.** Anything that lets it write or read outside what a lookup needs must be refused or documented in `docs/security.md`.
 - Tests that touch files use a temporary directory outside the repository (the workspace guard refuses config directories inside a git working tree).
 
