@@ -59,6 +59,7 @@ hgi auth login --no-browser          # prints a URL; open it anywhere, then past
 | `hgi tools list [--refresh] [--json]` | the tools the server offers you, with `call`/`run`, required fields, schemas and the MCP version |
 | `hgi call <tool> --input '<json>'` | run a read-only tool |
 | `hgi run <tool> --input '<json>'` | run a state-changing tool |
+| `hgi usage [--since <when>] [--by tool\|label\|day\|call]` | what `hgi` spent on this machine, from the local credit ledger (no sign-in needed) |
 | `hgi skill install` | copy the agent skill to `~/.claude/skills/hgi` |
 
 Options for `call`, `run` and `tools list`:
@@ -69,10 +70,22 @@ Options for `call`, `run` and `tools list`:
 - `--out <file>`: write the complete result to a new file.
 - `--meta`: print `{result, credit_cost, mcp_version}`.
 - `--timeout <seconds>`: per-request timeout (default 120).
+- `--label <label>` (`call` and `run`): tag the call in the credit ledger, for example by pipeline stage. 1 to 64 characters from `A-Z a-z 0-9 . _ : / -`.
 
 Global: `--base-url`, `--debug` (tokens are always masked), `--json-errors`.
 
 The credit cost of each call is printed on stderr after it runs (`credit_cost: 3`). There is no price before the call.
+
+Each call that reaches the server is also recorded in a local credit ledger, and `hgi usage` sums it:
+
+```bash
+hgi call company_enrich --input '{"domain":"acme.com"}' --label enrich
+hgi usage --since 7d            # credits and calls by tool, this machine only
+hgi usage --by label --since today
+hgi usage --by call -f csv      # one row per call, for a spreadsheet
+```
+
+`hgi usage` shows what `hgi` spent on this machine, not your organization's bill. Calls that cost `0` (a server-side cache hit or a free tool) are counted apart from calls whose cost the server did not report. See [output formats](docs/output-formats.md#hgi-usage) and [security](docs/security.md#the-credit-ledger).
 
 ## Using it from an AI coding agent
 
@@ -115,6 +128,8 @@ hgi call search_companies --input '{"query":"saas"}' -f csv --out saas.csv
 | `NODE_EXTRA_CA_CERTS` | extra CA bundle for corporate TLS inspection |
 | `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` | move `~/.config/hgi` and `~/.cache/hgi` |
 | `HGI_CONFIG_DIR`, `HGI_CACHE_DIR` | explicit directories (must not be inside a git working tree) |
+| `HGI_LEDGER` | credit ledger path (default `<config dir>/ledger.jsonl`; must not be inside a git working tree), or `off` to keep no history |
+| `HGI_BUDGET_ID` | recorded with each call in the credit ledger, to group the calls of one run |
 
 `hgi` sends the User-Agent `hgi/<version>` and has no telemetry: it talks only to the server you configure, and sends nothing to HG Insights or anyone else about how you use it.
 

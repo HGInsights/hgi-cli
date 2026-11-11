@@ -43,6 +43,9 @@ hgi run <tool> --input '{...}'                           # only after the user a
 - Output is JSON when piped and a table on a terminal. Use `-f json|jsonl|csv|yaml|table`.
 - `--select a,b.c` keeps only those fields (dotted paths work through arrays). Prefer it, or `--out <new file>`, for large results; results are never truncated.
 - `--meta` prints `{ "result": ..., "credit_cost": ..., "mcp_version": ... }` on stdout.
+- `--label <stage>` on `call`/`run` tags the call in the local credit ledger (1 to 64 of `A-Z a-z 0-9 . _ : / -`).
+- `hgi usage [--since today|24h|7d|2026-11-01] [--by tool|label|day|call]` shows the credits `hgi` spent on this machine (local only, no sign-in, not the organization's bill). `credits` excludes calls with unknown cost (`unknown_cost_calls`); `zero_cost_calls` are cache hits or free tools.
+- A `{"warning":"ledger_not_updated",...}` line on stderr means the call still succeeded; do not re-run it.
 
 ## Exit codes
 

@@ -1,10 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import lockfile from 'proper-lockfile';
-import { randomUrlSafe } from './pkce.js';
-import { debug } from '../debug.js';
 import { HgiError } from '../errors.js';
 import { registerSecret } from '../redact.js';
+import { withFileLock, type LockTiming } from '../file-lock.js';
 
 export interface Credentials {
   version: 1;
@@ -207,46 +205,9 @@ export function deleteCredentials(file: string): void {
   }
 }
 
-const LOCK_OPTIONS = {
-  stale: 30_000,
-  update: 5_000,
-  realpath: false,
-  retries: { retries: 60, factor: 1.4, minTimeout: 100, maxTimeout: 1_500, randomize: true },
-} as const;
+const LOCK_RETRIES = { retries: 60, factor: 1.4, minTimeout: 100, maxTimeout: 1_500, randomize: true } as const;
 
-function stampOwner(ownerPath: string, nonce: string): void {
-  let fd: number | undefined;
-  try {
-    fd = fs.openSync(
-      ownerPath,
-      fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
-      0o600,
-    );
-    if (!fs.fstatSync(fd).isFile()) throw new Error('not a regular file');
-    fs.writeFileSync(fd, nonce);
-  } catch (err) {
-    throw new HgiError('local_state_error', `Could not stamp the credentials lock (${ownerPath}): ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}.`, {
-      hint: `Remove ${ownerPath} if it is not a regular file, then retry.`,
-      details: { kind: 'lock_timeout' },
-      cause: err,
-    });
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-  }
-}
-
-function readOwner(ownerPath: string): string | null {
-  let fd: number | undefined;
-  try {
-    fd = fs.openSync(ownerPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
-    if (!fs.fstatSync(fd).isFile()) return null;
-    return fs.readFileSync(fd, 'utf8');
-  } catch {
-    return null;
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-  }
-}
+export type { LockTiming };
 
 export interface HeldLock {
   assertHeld(): void;
@@ -254,86 +215,20 @@ export interface HeldLock {
   remove(): void;
 }
 
-export interface LockTiming {
-  stale: number;
-  update: number;
-}
-
 export async function withLock<T>(file: string, fn: (lock: HeldLock) => Promise<T>, timing?: LockTiming): Promise<T> {
   ensureDir(path.dirname(file));
-  let compromised: unknown;
-  let release: () => Promise<void>;
-  try {
-    release = await lockfile.lock(file, {
-      ...LOCK_OPTIONS,
-      ...(timing ?? {}),
-      retries: { ...LOCK_OPTIONS.retries },
-      onCompromised: (err) => {
-        compromised = err;
-        debug('lock compromised', err);
+  return withFileLock(file, { label: 'credentials', retries: LOCK_RETRIES, timing }, (lock) => {
+    const held: HeldLock = {
+      assertHeld: () => lock.assertHeld(),
+      write(creds, hooks) {
+        lock.assertHeld();
+        writeCredentials(file, creds, { afterTemp: hooks?.afterTemp, beforeRename: () => lock.assertHeld() });
       },
-    });
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ELOCKED') {
-      throw new HgiError('local_state_error', 'Timed out waiting for another hgi process to finish.', {
-        hint: `If no other hgi is running, remove ${file}.lock and retry.`,
-        details: { kind: 'lock_timeout' },
-        cause: err,
-      });
-    }
-    throw new HgiError('local_state_error', `Could not take the credentials lock: ${(err as NodeJS.ErrnoException).code ?? 'error'}.`, {
-      details: { kind: 'lock_timeout' },
-      cause: err,
-    });
-  }
-  // proper-lockfile only notices a lost lock on its timer tick, so a process that stalled (a laptop
-  // asleep during a refresh) could still write before the flag flips. Every holder therefore stamps a
-  // nonce next to the lock on acquisition; a newer holder overwrites it, and each write or delete
-  // re-reads it synchronously. (Outside the lock directory so proper-lockfile can still rmdir a stale one.)
-  const ownerPath = `${file}.lock-owner`;
-  const nonce = randomUrlSafe(12);
-  const lost = (cause: unknown): HgiError =>
-    new HgiError('local_state_error', 'The credentials lock was lost while hgi was working (the process stalled for too long).', {
-      hint: 'Another hgi process may have taken over. Re-run your command.',
-      details: { kind: 'lock_compromised' },
-      cause,
-    });
-  const held: HeldLock = {
-    assertHeld() {
-      if (compromised !== undefined) throw lost(compromised);
-      if (readOwner(ownerPath) !== nonce) throw lost(new Error('lock owner changed'));
-    },
-    write(creds, hooks) {
-      held.assertHeld();
-      writeCredentials(file, creds, { afterTemp: hooks?.afterTemp, beforeRename: () => held.assertHeld() });
-    },
-    remove() {
-      held.assertHeld();
-      deleteCredentials(file);
-    },
-  };
-  let stamped = false;
-  try {
-    stampOwner(ownerPath, nonce);
-    stamped = true;
-    return await fn(held);
-  } finally {
-    // Only the current owner may unlink the owner file or release the lock: after a stall-then-takeover,
-    // proper-lockfile's release() would delete the SUCCESSOR's lock directory right now. A non-owner just
-    // leaves. proper-lockfile may still remove that directory at process exit if its overdue heartbeat has
-    // not yet flagged the loss; that narrow case fails closed (the successor's writes are refused by the
-    // owner check) and is covered by the stall-then-takeover residual in docs/security.md.
-    if (!stamped) {
-      await release().catch((err: unknown) => debug('lock release failed', err));
-    } else if (readOwner(ownerPath) === nonce) {
-      try {
-        fs.unlinkSync(ownerPath);
-      } catch {
-        // already gone
-      }
-      await release().catch((err: unknown) => debug('lock release failed', err));
-    } else if (compromised === undefined) {
-      debug('lock ownership changed; not releasing the successor\'s lock');
-    }
-  }
+      remove() {
+        lock.assertHeld();
+        deleteCredentials(file);
+      },
+    };
+    return fn(held);
+  });
 }

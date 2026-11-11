@@ -121,10 +121,12 @@ function workspaceRoot(): string | null {
   return top;
 }
 
-function guardOverride(dir: string, label: string): string {
+function guardOverride(dir: string, label: string, opts: { lexical?: boolean } = {}): string {
   const resolved = realpathDeep(dir);
   const root = workspaceRoot();
-  if (root && (isInside(resolved, root) || isInsideByInode(resolved, root))) {
+  const lexical = opts.lexical ? path.resolve(dir) : null;
+  const inside = (p: string) => isInside(p, root as string) || isInsideByInode(p, root as string);
+  if (root && (inside(resolved) || (lexical !== null && inside(lexical)))) {
     throw new HgiError('invalid_input', `${label} must not be inside a workspace (${root}).`, {
       hint: 'Credentials and caches never live in a project directory; choose a path outside it.',
       details: { reason: 'workspace_guard' },
@@ -137,6 +139,14 @@ export function configDir(env: Env = process.env): string {
   if (env.HGI_CONFIG_DIR) return guardOverride(env.HGI_CONFIG_DIR, 'HGI_CONFIG_DIR');
   if (env.XDG_CONFIG_HOME) return guardOverride(path.join(env.XDG_CONFIG_HOME, 'hgi'), 'XDG_CONFIG_HOME');
   return path.join(os.homedir(), '.config', 'hgi');
+}
+
+/**
+ * `HGI_LEDGER` override: refused when the path as given OR the file it resolves to is inside the current
+ * git working tree, so a symlink planted in the repository cannot carry the check outside it.
+ */
+export function guardLedgerOverride(file: string): string {
+  return guardOverride(file, 'HGI_LEDGER', { lexical: true });
 }
 
 export function cacheDir(env: Env = process.env): string {

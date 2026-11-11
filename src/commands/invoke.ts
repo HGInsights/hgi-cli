@@ -4,7 +4,8 @@ import { HgiError, toHgiError } from '../errors.js';
 import { readInputFile } from '../output/out-file.js';
 import { mcpCacheKey } from './tools.js';
 import { toolsCachePath, writeToolsCache } from '../mcp/cache.js';
-import { interpretResult } from '../mcp/result.js';
+import { budgetId, ledgerPath, parseLabel, recordCall } from '../ledger.js';
+import { creditCostOf, interpretResult } from '../mcp/result.js';
 import { openSession } from '../mcp/session.js';
 import { verbFor, type McpTool, type Verb } from '../mcp/tools.js';
 import { assertValidInput } from '../mcp/validate.js';
@@ -19,6 +20,7 @@ interface InvokeOptions {
   out?: string;
   force?: boolean;
   meta?: boolean;
+  label?: string;
   validate: boolean;
   timeout: string;
 }
@@ -89,6 +91,8 @@ async function runInvoke(verb: Verb, toolName: string, opts: InvokeOptions, cmd:
   const input = await readInput(opts.input);
   preflightOutput({ format: opts.format, select: opts.select, out: opts.out, force: opts.force, allowForce: verb === 'run' });
   const timeoutMs = parseTimeoutMs(opts.timeout);
+  const label = parseLabel(opts.label);
+  const ledger = ledgerPath();
   const ctx = buildContext(cmd);
   const creds = ctx.tokens.loadCredentials();
   const session = await openSession(ctx, { timeoutMs });
@@ -112,6 +116,20 @@ async function runInvoke(verb: Verb, toolName: string, opts: InvokeOptions, cmd:
     if (opts.validate) assertValidInput(tool, input);
 
     const result = await session.callTool(toolName, input);
+    // Recorded before interpreting (which throws on isError) and before any output, so an isError
+    // result, a failed --out or a broken stdout still leaves the row. Never fails the call.
+    await recordCall(ledger, {
+      v: 1,
+      ts: new Date().toISOString(),
+      host: new URL(ctx.base).host,
+      verb,
+      tool: toolName,
+      label,
+      credit_cost: creditCostOf(result),
+      budget_id: budgetId(),
+      mcp_version: session.state.mcpVersion,
+      status: result.isError ? 'tool_error' : 'ok',
+    });
     const outcome = interpretResult(result, toolName);
     const selected = applySelect(outcome.value, opts.select);
     const value = opts.meta
@@ -160,6 +178,7 @@ export function registerInvokeCommands(program: Command): void {
       .option('--out <file>', 'write the result to a new file instead of stdout')
       .option('--force', verb === 'run' ? 'overwrite an existing --out file' : 'not available on call')
       .option('--meta', 'print {result, credit_cost, mcp_version} instead of the bare result')
+      .option('--label <label>', 'tag this call in the local credit ledger (see `hgi usage --by label`)')
       .option('--timeout <seconds>', 'per-request timeout', '120')
       .addOption(new Option('--no-validate', 'skip client-side schema validation (let the server judge the input)').hideHelp())
       .action((tool: string, opts: InvokeOptions, cmd: Command) => runInvoke(verb, tool, opts, cmd));

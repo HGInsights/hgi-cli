@@ -39,7 +39,18 @@
 
 - `hgi call` only runs tools the server marks `readOnlyHint: true`, decided against a fresh tool list on every invocation. `hgi run` runs everything else, including tools with no annotations. There is no `--yes` flag, so a host permission rule on `hgi call *` approves only lookups.
 - `--out <file>` never overwrites an existing file on `hgi call`, never follows symlinks, and refuses paths inside hgi's config and cache directories. `--input @file` refuses hgi's own credential and cache files (including through symlinks and hard links). An allowlisted agent can still write a **new** file or send any other file it can read to HG Insights as tool input; scope your allowlist accordingly.
-- Credit cost is reported after each call. Credits are billed to your organization.
+- Credit cost is reported after each call and recorded in the local [credit ledger](#the-credit-ledger). Credits are billed to your organization.
+
+## The credit ledger
+
+`hgi call` and `hgi run` append one line per tool call that got a result back to a local ledger, which `hgi usage` summarizes. It is the one local write a lookup (`hgi call`) makes.
+
+- **What it holds:** the time, the server host, `call`/`run`, the tool name, your `--label`, the credit cost, `HGI_BUDGET_ID`, the MCP version and `ok`/`tool_error`. Never the tool input, the result, your user or organization, or any token: every text field is passed through the same redaction as error output, and the server-supplied MCP version is kept only when it is a short plain version string. See [output formats](output-formats.md#the-ledger-record) for the record format.
+- **Where:** `~/.config/hgi/ledger.jsonl` (or `$XDG_CONFIG_HOME/hgi`, `HGI_CONFIG_DIR`). `HGI_LEDGER=<path>` moves it; a path inside a git working tree (as given, or after following symlinks) is refused before anything is sent. If you keep `~/.config` in a dotfiles repository, exclude `hgi/` from it: the ledger records which tools you used and when.
+- **Protection:** the same as the credentials file. The directory is `0700`, the file `0600` from the first write (a pre-existing file with looser permissions is tightened), and a symlink or non-regular file at the ledger path is refused, never followed. Appends from parallel `hgi` processes are serialized with a lock on `<ledger>.lock` and written with one `O_APPEND` write each.
+- **Never fails a call:** if the ledger cannot be written (lock timeout, unsafe path, disk full), `hgi` prints a warning and keeps the call's normal output and exit code, because the tool already ran and was billed.
+- **Off:** `HGI_LEDGER=off` keeps no history: nothing is written and nothing is locked.
+- **Deleting it:** deleting or truncating the file is safe at any time; it only resets the local history `hgi usage` reports.
 
 ## Network
 

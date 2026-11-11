@@ -6,7 +6,7 @@ Every failure has its own exit code, so a script can branch without parsing Engl
 |---|---|---|
 | 0 | | success |
 | 1 | `internal_error` | a bug in `hgi`. Never used for a server response or a usage error |
-| 2 | `invalid_input` | bad flags or usage; invalid JSON; input that fails the tool's schema; unknown tool; unreadable `--input @file`; `--out` refusals (exists, symlink, protected path, `--force` on `call`); config-dir workspace guard |
+| 2 | `invalid_input` | bad flags or usage; invalid JSON; input that fails the tool's schema; unknown tool; unreadable `--input @file`; `--out` refusals (exists, symlink, protected path, `--force` on `call`); config-dir or `HGI_LEDGER` workspace guard (`workspace_guard`); a bad `--label` (`bad_label`), `hgi usage --since` (`bad_since`) or `--by` (`bad_by`) |
 | 3 | `tool_error` | the tool returned `isError` (including server-side invalid arguments, which the server reports in-band), a JSON-RPC error, or a response `hgi` could not parse after the call was sent |
 | 4 | `login_required`, `login_expired` | no credentials; a second 401 after one refresh; the refresh token was rejected (`invalid_grant`) |
 | 5 | `rate_limited` | 429 after bounded retries (MCP calls); a 429 from the userinfo or revoke endpoint exits at once |
@@ -16,7 +16,7 @@ Every failure has its own exit code, so a script can branch without parsing Engl
 | 9 | `network_proxy_tls` | TLS verification failure or proxy failure; the message names the cause (for example `DEPTH_ZERO_SELF_SIGNED_CERT`) |
 | 10 | `wrong_verb` | `hgi call` on a state-changing tool, or `hgi run` on a read-only one. Nothing is sent |
 | 11 | `forbidden` | HTTP 403 |
-| 12 | `local_state_error` | corrupt or unsafe-mode credentials file (`details.kind` is `credentials_corrupt` or `credentials_unsafe`), lock timeout, or a failed local write. If `details.tool_ran` is `true` (an `--out` write failed *after* the tool ran), the tool already ran and was billed, its result was printed to stdout instead, and you must **not** re-run it |
+| 12 | `local_state_error` | corrupt or unsafe-mode credentials file (`details.kind` is `credentials_corrupt` or `credentials_unsafe`), lock timeout, or a failed local write; `hgi usage` on a credit ledger that is a symlink or not a regular file (`details.kind: "ledger_unsafe"`) or cannot be read (`details.kind: "read_failed"`, `details.reason` is the error code). If `details.tool_ran` is `true` (an `--out` write failed *after* the tool ran), the tool already ran and was billed, its result was printed to stdout instead, and you must **not** re-run it |
 
 `hgi --help` and `hgi --version` exit 0.
 
@@ -47,3 +47,7 @@ On a terminal, errors are plain text with a hint.
 ## Credit cost
 
 Success prints the tool result on stdout and the credit cost on stderr (`credit_cost: 3`, or `{"credit_cost":3}` when stderr is not a terminal). Tools that do not report a cost (external, aggregated tools) show `unknown` / `null`, never `0`.
+
+## Credit ledger
+
+A credit ledger problem during `hgi call` or `hgi run` (the lock timed out, the ledger path is a symlink or not a regular file, the write failed) is a warning, never an exit code: the tool already ran and was billed, and a failure would invite a billed re-run. Stdout and the exit code are exactly what they would otherwise be, and stderr gets one line, `hgi: warning: credit ledger not updated: <reason>` on a terminal or `{"warning":"ledger_not_updated","reason":"<reason>"}` when stderr is JSON. The one exception is an `HGI_LEDGER` path inside a git working tree, refused with exit 2 (`workspace_guard`) before anything is sent.
