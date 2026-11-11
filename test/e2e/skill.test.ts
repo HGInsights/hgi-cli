@@ -97,6 +97,19 @@ describe('SKILL.md (Story 10)', () => {
     expect(recipe).toMatch(/`fields:\["summary"\]` without a topic filter rejects `granularity` \(422\)/);
     expect(recipe).toMatch(/`fields:\["topics"\]`, pass `granularity:"global"`/);
   });
+  it('Score: the example page loop reads its limits from the schema and has real stop conditions', () => {
+    const loop = /```bash\n(# technographics page loop[\s\S]*?\ndone)\n/.exec(section('### Score fit and propensity'))?.[1] ?? '';
+    expect(loop).toMatch(/hgi tools list --json \| jq[^\n]*company_technographic/);
+    expect(loop).toMatch(/\.max_results\.maximum[\s\S]*\.offset\.maximum/);
+    expect(loop).toMatch(/while \[ "\$ids" != "\[\]" \]/);
+    expect(loop).toMatch(/-gt "\$maxoff" \]; then echo "partial[^\n]*break; fi/);
+    expect(loop).toMatch(/\.installs_count == \$max and \$off \+ \$max < \.total_installs_count/);
+  });
+  it('takes limits from the schema, never quoting a number for them', () => {
+    const recipes = section('## Recipes');
+    expect(recipes).not.toMatch(/currently \d/);
+    expect(recipes).not.toMatch(/"max_results":\s*\d/);
+  });
   it('Spend: resolve category ids first, pass them in the batched call, never add a parent to its children', () => {
     const recipe = section('### Size wallet from spend');
     expect(recipe).toMatch(/2\. [^\n]*resolve its category ids first with `get_product_category`/);

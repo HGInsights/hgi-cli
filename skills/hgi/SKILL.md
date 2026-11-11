@@ -59,7 +59,7 @@ These recipes name tools as examples. Before each one:
 ### Match an account list
 
 **Tools:** `search_companies`, `company_firmographic`. Confirm them in `hgi tools list --json`; if one is missing, skip that step and tell the user which tool is unavailable.
-**Batch:** read `maxItems` on `hg_ids` in `company_firmographic`'s `input_schema` (currently 25).
+**Batch:** read `maxItems` on `hg_ids` in `company_firmographic`'s `input_schema`.
 **Order:**
 
 1. `search_companies` per account: the name, the HQ country and a revenue floor (USD), `limit` small. It returns only `hg_id`, `name`, `domain`, `domain_normalized`.
@@ -74,7 +74,7 @@ hgi call company_firmographic --input '{"hg_ids":["<id1>","<id2>"]}' --select co
 ### Score fit and propensity
 
 **Tools:** `company_technographic`, `company_intent`, `list_intent_topics`. Confirm them in `hgi tools list --json`; if one is missing, skip that step and tell the user which tool is unavailable.
-**Batch:** read `maxItems` on `hg_ids` in `company_technographic`'s `input_schema` (currently 25), and the maximum of `max_results` and `offset`. `company_intent` takes one company per call.
+**Batch:** read `maxItems` on `hg_ids` in `company_technographic`'s `input_schema`, and the maximum of `max_results` and `offset`. `company_intent` takes one company per call.
 **Order:**
 
 1. **Fit:** `company_technographic` on a sorted batch of `hg_ids`, filtered (`vendor_names`, `product_names` or `category_ids`) so pages stay small. Page with `offset`. Stop on a short page (fewer rows than `max_results`), once `total_installs_count` is reached, or at the schema's `offset` maximum. Don't stop on `has_more` alone: it can be wrong at page boundaries. At the `offset` maximum, report the result as partial and narrow the filter.
@@ -83,13 +83,15 @@ hgi call company_firmographic --input '{"hg_ids":["<id1>","<id2>"]}' --select co
 4. **Baseline:** large companies are active on about 70% of the ~20,000-topic catalogue (observed), so a raw topic count measures size, not interest. Compare the curated topics (`topic_ids`) with the company's own unfiltered summary. A summary with `topic_ids` counts only those topics. `fields:["summary"]` without a topic filter rejects `granularity` (422). When you request `fields:["topics"]`, pass `granularity:"global"`: the default is one row per state, which counts a topic several times.
 
 ```bash
-# technographics page loop: stop on a short page, the stated total, or the offset maximum
-off=0; max=100
-while :; do
-  hgi call company_technographic --input "{\"hg_ids\":[\"<id1>\",\"<id2>\"],\"vendor_names\":[\"<vendor>\"],\"max_results\":$max,\"offset\":$off}" --out "tech-$off.json"
-  # from tech-$off.json read installs_count and total_installs_count per company;
-  # break when every company returned fewer than $max rows or reached its total,
-  # or when the next offset would pass the schema's offset maximum
+# technographics page loop; page size and offset maximum come from the schema
+schema=$(hgi tools list --json | jq '.tools[] | select(.name=="company_technographic") | .input_schema.properties')
+max=$(jq '.max_results.maximum' <<<"$schema"); maxoff=$(jq '.offset.maximum' <<<"$schema")
+ids='["<id1>","<id2>"]'; off=0   # one sorted batch of at most hg_ids.maxItems ids
+while [ "$ids" != "[]" ]; do
+  if [ "$off" -gt "$maxoff" ]; then echo "partial: offset maximum reached for $ids" >&2; break; fi
+  hgi call company_technographic --input "{\"hg_ids\":$ids,\"vendor_names\":[\"<vendor>\"],\"max_results\":$max,\"offset\":$off}" -f json > "tech-$off.json" || break
+  # next page only for companies that filled this page and are short of their stated total
+  ids=$(jq -c --argjson max "$max" --argjson off "$off" '[.companies[] | select(.installs_count == $max and $off + $max < .total_installs_count) | .company_id]' "tech-$off.json")
   off=$((off + max))
 done
 hgi call company_intent --input '{"company_domain":"accor.com"}'
@@ -99,7 +101,7 @@ hgi call company_intent --input '{"company_domain":"accor.com","fields":["summar
 ### Size wallet from spend
 
 **Tools:** `company_spend`, `get_product_category`. Confirm them in `hgi tools list --json`; if one is missing, skip that step and tell the user which tool is unavailable.
-**Batch:** read `maxItems` on `hg_ids` in `company_spend`'s `input_schema` (currently 25), and the maximum of `max_results`.
+**Batch:** read `maxItems` on `hg_ids` in `company_spend`'s `input_schema`, and the maximum of `max_results`.
 **Order:**
 
 1. Use the `hg_id`s from the matching recipe, sorted.
@@ -109,7 +111,7 @@ hgi call company_intent --input '{"company_domain":"accor.com","fields":["summar
 5. Rows are per country, and categories form a tree through `category_parent_id` (Total IT → Total External IT → Software, …). Sum across countries, never a parent with its children.
 
 ```bash
-hgi call company_spend --input '{"hg_ids":["<id1>","<id2>"],"category_ids":["<category id>"],"max_results":25}' --select companies.company_id,companies.spend.all
+hgi call company_spend --input '{"hg_ids":["<id1>","<id2>"],"category_ids":["<category id>"]}' --select companies.company_id,companies.spend.all
 ```
 
 ## Data semantics
