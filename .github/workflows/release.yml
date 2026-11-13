@@ -301,6 +301,7 @@ jobs:
           Binaries: \`hgi-$TAG-darwin-arm64\`, \`darwin-x64\`, \`linux-x64\`, \`linux-arm64\` (.tar.gz).
           An SBOM (CycloneDX) is attached. macOS binaries are not Developer ID signed or notarized: a tarball downloaded through a browser needs \`xattr -d com.apple.quarantine hgi\` once; Homebrew and npm installs are unaffected.
           Install routes: \`brew install hginsights/tap/hgi\`, \`npm install -g @hginsights/hgi\`, or the tarballs below.
+          If you installed the agent skill with \`hgi skill install\`, run \`hgi skill install --force\` after upgrading to get the current version.
           EOF
           flags=()
           [ "$KIND" = rc ] && flags+=(--prerelease)
