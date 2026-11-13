@@ -46,8 +46,13 @@ function protectedInodes(protectedDirs: string[]): fs.Stats[] {
   return stats;
 }
 
-export function readInputFile(file: string, protectedDirs: string[], hooks: { beforeOpen?: () => void; afterCheck?: () => void } = {}): string {
-  const real = assertNotProtected(file, protectedDirs, '--input @file');
+export function readInputFile(
+  file: string,
+  protectedDirs: string[],
+  hooks: { beforeOpen?: () => void; afterCheck?: () => void } = {},
+  what = '--input @file',
+): string {
+  const real = assertNotProtected(file, protectedDirs, what);
   let fd: number | undefined;
   try {
     hooks.beforeOpen?.();

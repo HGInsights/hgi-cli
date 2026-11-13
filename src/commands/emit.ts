@@ -1,6 +1,6 @@
 import { protectedDirs } from '../config.js';
 import { applySelect } from '../output/select.js';
-import { defaultFormat, formatValue, parseFormat } from '../output/format.js';
+import { defaultFormat, formatValue, parseFormat, type Format } from '../output/format.js';
 import { preflightOutFile, writeOutFile } from '../output/out-file.js';
 import { escapeJsonForTerminal, sanitizeForTerminal } from '../output/sanitize.js';
 import { parseSelect } from '../output/select.js';
@@ -29,7 +29,13 @@ export function preflightOutput(opts: EmitOptions): void {
 export async function emit(value: unknown, opts: EmitOptions = {}): Promise<void> {
   const isTty = Boolean(process.stdout.isTTY);
   const format = opts.format ? parseFormat(opts.format) : defaultFormat(isTty);
-  let text = formatValue(applySelect(value, opts.select), format, { pretty: isTty });
+  await emitText(formatValue(applySelect(value, opts.select), format, { pretty: isTty }), format, opts);
+}
+
+/** Writes already-formatted text to `--out` or stdout, neutralising terminal controls on a TTY. */
+export async function emitText(formatted: string, format: Format, opts: EmitOptions = {}): Promise<void> {
+  const isTty = Boolean(process.stdout.isTTY);
+  let text = formatted;
   if (isTty && !opts.out) {
     if (format === 'table' || format === 'csv' || format === 'yaml') text = sanitizeForTerminal(text);
     else if (format === 'json' || format === 'jsonl') text = escapeJsonForTerminal(text);

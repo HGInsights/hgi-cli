@@ -15,7 +15,9 @@
 # Configures:
 #   * secret scanning + push protection, Dependabot alerts and security updates, private vulnerability reporting,
 #     read-only workflow token, and manual approval of workflow runs from outside contributors
-#   * ruleset "main protection": PR + 1 approving review + code owner review, required checks, no force push, no deletion, no bypass
+#   * ruleset "main protection": PR + 1 approving review + code owner review, required checks, no force push, no deletion, no bypass.
+#     An approval survives later pushes (no stale-review dismissal, no last-push approval) and a branch need not be
+#     up to date with main to merge, so a rebase or branch update never asks for a second review
 #   * ruleset "release tags": only the repository `maintain` role (and admins) may create, move or delete v* tags.
 #     GitHub rejects a team as a ruleset bypass actor on this plan, so <team-slug> is granted the `maintain`
 #     role on the repository instead and the bypass is by role
@@ -81,11 +83,11 @@ main_ruleset="$(jq -n --argjson checks "$required_checks" '{
     {type: "deletion"},
     {type: "non_fast_forward"},
     {type: "pull_request", parameters: {
-      required_approving_review_count: 1, dismiss_stale_reviews_on_push: true,
-      require_code_owner_review: true, require_last_push_approval: true,
+      required_approving_review_count: 1, dismiss_stale_reviews_on_push: false,
+      require_code_owner_review: true, require_last_push_approval: false,
       required_review_thread_resolution: true}},
     {type: "required_status_checks", parameters: {
-      strict_required_status_checks_policy: true, required_status_checks: $checks}}
+      strict_required_status_checks_policy: false, required_status_checks: $checks}}
   ]}')"
 
 # RepositoryRole actor ids (built-in roles): read=1, write=2, triage=3, maintain=4, admin=5.

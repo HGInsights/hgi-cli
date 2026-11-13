@@ -53,7 +53,10 @@ export class FakeServer {
   tools: FakeTool[] = [];
   /** When set, `initialize` answers with this protocol version instead of echoing the client's. */
   forcedProtocolVersion: string | null = null;
-  handlers = new Map<string, (args: Record<string, unknown>) => ToolResult>();
+  handlers = new Map<string, (args: Record<string, unknown>) => ToolResult | Promise<ToolResult>>();
+  /** `tools/call` requests being handled right now, and the most ever seen at once. */
+  inFlight = 0;
+  maxInFlight = 0;
   faults: Fault[] = [];
   requests: LoggedRequest[] = [];
   accessTtlSec = 3600;
@@ -98,6 +101,8 @@ export class FakeServer {
     this.codes.clear();
     this.refreshCalls = 0;
     this.forcedProtocolVersion = null;
+    this.inFlight = 0;
+    this.maxInFlight = 0;
   }
 
   toolCalls(): LoggedRequest[] {
@@ -320,7 +325,12 @@ export class FakeServer {
         if (!handler) {
           return this.json(res, 200, { jsonrpc: '2.0', id: message.id, error: { code: -32602, message: `Tool ${name} not found` } });
         }
-        return reply(handler((message.params?.arguments as Record<string, unknown>) ?? {}));
+        this.inFlight += 1;
+        this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
+        void Promise.resolve(handler((message.params?.arguments as Record<string, unknown>) ?? {}))
+          .then(reply)
+          .finally(() => (this.inFlight -= 1));
+        return;
       }
       default:
         return this.json(res, 200, { jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } });
