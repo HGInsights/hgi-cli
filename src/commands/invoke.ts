@@ -11,6 +11,8 @@ import { assertValidInput } from '../mcp/validate.js';
 import { buildContext } from './context.js';
 import { applySelect } from '../output/select.js';
 import { emit, preflightOutput } from './emit.js';
+import { preflightBatchFlags, readIds, runBatch } from './batch.js';
+import { readStdin, reportCredit } from './io.js';
 
 interface InvokeOptions {
   input?: string;
@@ -21,6 +23,9 @@ interface InvokeOptions {
   meta?: boolean;
   validate: boolean;
   timeout: string;
+  ids?: string;
+  idsColumn?: string;
+  batchSize?: string;
 }
 
 export function parseTimeoutMs(raw: string): number {
@@ -31,12 +36,6 @@ export function parseTimeoutMs(raw: string): number {
     });
   }
   return seconds * 1000;
-}
-
-async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk as Buffer));
-  return Buffer.concat(chunks).toString('utf8');
 }
 
 export async function readInput(raw: string | undefined): Promise<Record<string, unknown>> {
@@ -67,11 +66,6 @@ function suggest(name: string, tools: McpTool[]): string[] {
     .slice(0, 5);
 }
 
-function reportCredit(cost: number | null): void {
-  const json = !process.stderr.isTTY || process.argv.includes('--json-errors');
-  process.stderr.write(json ? `${JSON.stringify({ credit_cost: cost })}\n` : `credit_cost: ${cost ?? 'unknown'}\n`);
-}
-
 export function assertVerb(requested: Verb, tool: McpTool): void {
   const expected = verbFor(tool);
   if (requested === expected) return;
@@ -86,9 +80,11 @@ export function assertVerb(requested: Verb, tool: McpTool): void {
 }
 
 async function runInvoke(verb: Verb, toolName: string, opts: InvokeOptions, cmd: Command): Promise<void> {
+  const batchSize = preflightBatchFlags(opts);
   const input = await readInput(opts.input);
   preflightOutput({ format: opts.format, select: opts.select, out: opts.out, force: opts.force, allowForce: verb === 'run' });
   const timeoutMs = parseTimeoutMs(opts.timeout);
+  const ids = opts.ids === undefined ? undefined : await readIds({ ...opts, ids: opts.ids }, input);
   const ctx = buildContext(cmd);
   const creds = ctx.tokens.loadCredentials();
   const session = await openSession(ctx, { timeoutMs });
@@ -109,6 +105,17 @@ async function runInvoke(verb: Verb, toolName: string, opts: InvokeOptions, cmd:
       });
     }
     assertVerb(verb, tool);
+    if (ids) {
+      await runBatch(session, tool, input, ids, {
+        batchSize,
+        format: opts.format,
+        select: opts.select,
+        out: opts.out,
+        meta: opts.meta,
+        validate: opts.validate,
+      });
+      return;
+    }
     if (opts.validate) assertValidInput(tool, input);
 
     const result = await session.callTool(toolName, input);
@@ -151,7 +158,7 @@ export function registerInvokeCommands(program: Command): void {
     run: 'Run a tool that changes state or starts work. Fails for read-only tools.',
   };
   for (const verb of ['call', 'run'] as const) {
-    program
+    const cmd = program
       .command(`${verb} <tool>`)
       .description(describeVerb[verb])
       .option('--input <json>', 'tool arguments as a JSON object; @file or - reads a file or stdin')
@@ -161,7 +168,13 @@ export function registerInvokeCommands(program: Command): void {
       .option('--force', verb === 'run' ? 'overwrite an existing --out file' : 'not available on call')
       .option('--meta', 'print {result, credit_cost, mcp_version} instead of the bare result')
       .option('--timeout <seconds>', 'per-request timeout', '120')
-      .addOption(new Option('--no-validate', 'skip client-side schema validation (let the server judge the input)').hideHelp())
-      .action((tool: string, opts: InvokeOptions, cmd: Command) => runInvoke(verb, tool, opts, cmd));
+      .addOption(new Option('--no-validate', 'skip client-side schema validation (let the server judge the input)').hideHelp());
+    if (verb === 'call') {
+      cmd
+        .option('--ids <source>', 'batch over HG ids or domains, one per line: @file or - (stdin); prints one row per line')
+        .option('--ids-column <name>', 'with --ids, read the file as CSV with a header row and take ids from this column')
+        .option('--batch-size <n>', "with --ids, send fewer ids per call than the tool's limit");
+    }
+    cmd.action((tool: string, opts: InvokeOptions, c: Command) => runInvoke(verb, tool, opts, c));
   }
 }

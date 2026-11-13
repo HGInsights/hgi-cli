@@ -58,6 +58,7 @@ hgi auth login --no-browser          # prints a URL; open it anywhere, then past
 | `hgi auth logout [--force]` | revoke the session on the server and delete the local credentials |
 | `hgi tools list [--refresh] [--json]` | the tools the server offers you, with `call`/`run`, required fields, schemas and the MCP version |
 | `hgi call <tool> --input '<json>'` | run a read-only tool |
+| `hgi call <tool> --ids @file` | run a read-only batch tool over a list of HG ids or domains, one row per line |
 | `hgi run <tool> --input '<json>'` | run a state-changing tool |
 | `hgi skill install` | copy the agent skill to `~/.claude/skills/hgi` |
 
@@ -69,6 +70,12 @@ Options for `call`, `run` and `tools list`:
 - `--out <file>`: write the complete result to a new file.
 - `--meta`: print `{result, credit_cost, mcp_version}`.
 - `--timeout <seconds>`: per-request timeout (default 120).
+
+Options for `call` only (batching):
+
+- `--ids @file` / `--ids -`: one HG id or domain per line, from a file or stdin. Blank lines and `#` lines are skipped. A line with a dot is a domain, anything else an HG id.
+- `--ids-column <name>`: with `--ids`, read the file as CSV with a header row and take the ids from that column.
+- `--batch-size <n>`: send fewer ids per call than the tool's limit (its schema's `maxItems`, or 25).
 
 Global: `--base-url`, `--debug` (tokens are always masked), `--json-errors`.
 
@@ -103,6 +110,17 @@ Failures have distinct exit codes and a stable JSON error on stderr; see [exit c
 hgi call company_enrich --input '{"domain":"acme.com"}' --select name,employees | jq .
 hgi call search_companies --input '{"query":"saas"}' -f csv --out saas.csv
 ```
+
+### Looking up a whole list
+
+`--ids` splits a list into batches the tool accepts, sends them one at a time, and prints one JSONL row per input line, in your file's order, as soon as each batch returns:
+
+```bash
+hgi call company_spend --ids @hg_ids.txt --input '{"category_names":["CRM"]}' > spend.jsonl
+hgi call company_spend --ids @accounts.csv --ids-column hg_id --input '{"category_names":["CRM"]}'
+```
+
+Each row is `{"input": "<your line>", "result": {...}}` or `{"input": "<your line>", "error": {"code": "not_found", "message": "..."}}`, so joining back to your spreadsheet works even when the server drops leading zeros from ids or you wrote `https://www.Example.com/about`. Duplicate lines are sent once and get their row repeated. Running the same file again sends identical batches. The rest of `--input` is sent with every batch. A failed batch marks its rows with the error, the run continues, and the exit code is 3. Out of credits, an expired sign-in or an unreachable server stops the run at once, with the rows so far kept (see [exit codes](docs/exit-codes.md#partial-output-from---ids)). The total credit cost is printed once at the end.
 
 ## Configuration
 

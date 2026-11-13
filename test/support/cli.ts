@@ -89,6 +89,7 @@ export function readCreds(sandbox: Sandbox): { access_token: string; refresh_tok
 export interface LiveCli {
   child: ReturnType<typeof spawn>;
   waitForStderr(pattern: RegExp, timeoutMs?: number): Promise<string>;
+  waitForStdout(pattern: RegExp, timeoutMs?: number): Promise<string>;
   write(text: string): void;
   result(): Promise<CliResult>;
 }
@@ -99,19 +100,22 @@ export function startCli(args: string[], env: NodeJS.ProcessEnv): LiveCli {
   let stdout = '';
   let stderr = '';
   const watchers: Array<() => void> = [];
-  child.stdout?.on('data', (d: Buffer) => (stdout += d.toString()));
+  child.stdout?.on('data', (d: Buffer) => {
+    stdout += d.toString();
+    watchers.forEach((w) => w());
+  });
   child.stderr?.on('data', (d: Buffer) => {
     stderr += d.toString();
     watchers.forEach((w) => w());
   });
   const closed = new Promise<CliResult>((resolve) => child.on('close', (code) => resolve({ code, stdout, stderr })));
-  return {
-    child,
-    waitForStderr: (pattern, timeoutMs = 15_000) =>
+  const waitFor =
+    (read: () => string, name: string) =>
+    (pattern: RegExp, timeoutMs = 15_000): Promise<string> =>
       new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`timeout waiting for ${pattern}; stderr=${stderr}`)), timeoutMs);
+        const timer = setTimeout(() => reject(new Error(`timeout waiting for ${pattern} on ${name}; stdout=${stdout} stderr=${stderr}`)), timeoutMs);
         const check = () => {
-          const m = pattern.exec(stderr);
+          const m = pattern.exec(read());
           if (m) {
             clearTimeout(timer);
             resolve(m[1] ?? m[0]);
@@ -119,8 +123,36 @@ export function startCli(args: string[], env: NodeJS.ProcessEnv): LiveCli {
         };
         watchers.push(check);
         check();
-      }),
+      });
+  return {
+    child,
+    waitForStderr: waitFor(() => stderr, 'stderr'),
+    waitForStdout: waitFor(() => stdout, 'stdout'),
     write: (text) => child.stdin?.write(text),
     result: () => closed,
   };
+}
+
+/**
+ * Runs hgi with stdout and stderr on a pseudo-terminal, through script(1). Returns null when script(1) is missing.
+ * The PTY merges both streams into `stdout`.
+ */
+export async function runCliInPty(args: string[], env: NodeJS.ProcessEnv): Promise<CliResult | null> {
+  const { command, prefix } = hgiCommand();
+  const quote = (s: string) => `'${s.split("'").join(`'"'"'`)}'`;
+  const line = [command, ...prefix, ...args].map(quote).join(' ');
+  const scriptArgs = process.platform === 'darwin' ? ['-q', '/dev/null', 'sh', '-c', line] : ['-qec', line, '/dev/null'];
+  return new Promise((resolve, reject) => {
+    const child = spawn('script', scriptArgs, { env: { ...env, TERM: 'dumb' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d: Buffer) => (stdout += d.toString()));
+    child.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
+    child.on('error', (err: NodeJS.ErrnoException) => (err.code === 'ENOENT' ? resolve(null) : reject(err)));
+    const timer = setTimeout(() => child.kill('SIGKILL'), 40_000);
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code, stdout: stdout.split('\r\n').join('\n'), stderr });
+    });
+  });
 }
