@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { LOOPBACK_REDIRECT_HOST } from '../config.js';
 import { HgiError } from '../errors.js';
 import { evaluateCallbackParams } from './callback.js';
+import { loginTimeoutHint } from './recovery.js';
 
 export interface LoopbackHandle {
   port: number;
@@ -16,7 +17,7 @@ const PAGE = (title: string, body: string) =>
   `<body style="font-family:system-ui;max-width:32rem;margin:4rem auto;line-height:1.5">` +
   `<h1>${title}</h1><p>${body}</p></body></html>`;
 
-export async function startLoopback(opts: { state: string; timeoutMs: number }): Promise<LoopbackHandle> {
+export async function startLoopback(opts: { state: string; timeoutMs: number; base: string }): Promise<LoopbackHandle> {
   let settle!: { resolve: (code: string) => void; reject: (err: unknown) => void };
   const result = new Promise<string>((resolve, reject) => {
     settle = { resolve, reject };
@@ -54,7 +55,7 @@ export async function startLoopback(opts: { state: string; timeoutMs: number }):
     done = true;
     settle.reject(
       new HgiError('oauth_error', 'Timed out waiting for the browser sign-in to finish.', {
-        hint: 'Run `hgi auth login` again, or use `--no-browser` on a remote machine.',
+        hint: loginTimeoutHint(opts.base),
         details: { reason: 'login_timeout' },
       }),
     );

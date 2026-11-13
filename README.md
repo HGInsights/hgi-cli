@@ -45,6 +45,7 @@ If `hgi --version` still shows the old version, `which -a hgi` lists every copy 
 
 ### Troubleshooting
 
+- **`hgi auth login` ends on a `403 Forbidden` page.** Open a private window (or clear your browser's cookies for phoenix.hginsights.com, or for the host in your `HGI_BASE_URL`), sign in at https://phoenix.hginsights.com (or your `HGI_BASE_URL`) first, then open the URL `hgi auth login` printed in that same window. Sign-in still finishes in the terminal. If `hgi` already timed out, run `hgi auth login` again and open the new URL in that window.
 - The binary and the npm install both honor `NODE_OPTIONS`. If your shell exports `--require` or `--import` hooks (for example a tracer), `hgi` can fail to start: run `env -u NODE_OPTIONS hgi ...`.
 
 ## Quick start
