@@ -138,6 +138,12 @@ async function emitResult(value: unknown, verb: Verb, opts: InvokeOptions, credi
  */
 async function runPaged(ctx: PagingContext, verb: Verb, opts: InvokeOptions, mcpVersion: () => string | null): Promise<void> {
   const paged = await runAllPages(ctx);
+  if (paged.pageOneBudgetFailure && paged.failure) {
+    // Page 1 ran but its spend was not recorded: the single-call contract, byte for byte.
+    const one = applySelect(paged.value, opts.select);
+    const value = opts.meta ? { result: one, credit_cost: paged.creditCost, mcp_version: mcpVersion() } : one;
+    await failAfterBudgetWrite(paged.failure, value, opts, paged.creditCost);
+  }
   const selected = applySelect(paged.value, opts.select);
   const value = opts.meta
     ? {

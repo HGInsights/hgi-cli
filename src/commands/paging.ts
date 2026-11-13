@@ -74,6 +74,11 @@ export interface PagedOutcome {
   creditCost: number | null;
   /** A failure after page 1. The merged value holds everything before it. */
   failure?: HgiError;
+  /**
+   * Page 1 ran but its spend could not be recorded under a run cap. `value` is page 1 exactly as the server sent
+   * it and `failure` is that budget error: the caller handles it as a single call would.
+   */
+  pageOneBudgetFailure?: true;
 }
 
 interface Tracker {
@@ -351,8 +356,8 @@ export async function runAllPages(ctx: PagingContext): Promise<PagedOutcome> {
     ...(failure ? { failure } : {}),
   });
   if (first.budgetFailure) {
-    // Page 1 ran but its spend was not recorded: keep page 1, page no further.
-    return outcome(stopUnfinished(p, ctx, first.value, first.budgetFailure.code), first.budgetFailure);
+    // Exactly what `hgi call` does without --all-pages: page 1 as sent, then exit 12 `budget_write_failed`.
+    return { ...outcome(first.value, first.budgetFailure), pageOneBudgetFailure: true };
   }
   try {
     return outcome(ctx.spec.kind === 'top' ? await pageTop(p, ctx, first.value) : await pageItems(p, ctx, first.value));
@@ -360,16 +365,4 @@ export async function runAllPages(ctx: PagingContext): Promise<PagedOutcome> {
     if (err instanceof StopPaging) return outcome(err.merged, err.error);
     throw err;
   }
-}
-
-/** Page 1 only, with every unfinished page object marked truncated by `reason`. */
-function stopUnfinished(p: Pager, ctx: PagingContext, value: unknown, reason: string): unknown {
-  const close = (t: Tracker) => {
-    if (!t.done) Object.assign(t, { done: true, reason });
-    return p.merged(t);
-  };
-  if (ctx.spec.kind === 'top') return isRecord(value) ? close(p.track(value)) : value;
-  const itemsKey = ctx.spec.itemsKey as string;
-  if (!isRecord(value) || !Array.isArray(value[itemsKey])) return value;
-  return { ...value, [itemsKey]: (value[itemsKey] as unknown[]).map((e) => (isRecord(e) ? close(p.track(e)) : e)) };
 }

@@ -277,6 +277,50 @@ describe('Story 3: a failure does not throw away what was paid for', () => {
     expect(errorBody(paged)).toEqual(errorBody(single));
   });
 
+  describe('when the run cap cannot record a page', () => {
+    const budgets = () => path.join(sb.configDir, 'budgets');
+    /** Makes the budgets directory read-only while call `n` runs, so its spend cannot be recorded. */
+    const lockOnCall = (n: number) => {
+      const inner = topHandler({ rows: 30 });
+      let count = 0;
+      server.handlers.set('list_widgets', async (args) => {
+        count += 1;
+        if (count === n) fs.chmodSync(budgets(), 0o500);
+        return inner(args);
+      });
+    };
+    afterEach(() => {
+      try {
+        fs.chmodSync(budgets(), 0o700);
+      } catch {
+        // never created
+      }
+    });
+
+    it('on page 1: exactly what hgi call does (page 1 on stdout, exit 12 tool_ran, no paging fields)', async () => {
+      lockOnCall(1);
+      const paged = await call('list_widgets', {}, ['--all-pages', '--max-credits', '50'], { ...sb.env, HGI_BUDGET_ID: 'p1' });
+      fs.chmodSync(budgets(), 0o700);
+      lockOnCall(1);
+      const single = await call('list_widgets', {}, ['--max-credits', '50'], { ...sb.env, HGI_BUDGET_ID: 'p2' });
+      expect(paged.code, paged.stderr).toBe(12);
+      expect(paged.stdout).toBe(single.stdout);
+      expect(errorBody(paged)).toEqual(errorBody(single));
+      expect(errorBody(paged).error.details).not.toHaveProperty('partial_result');
+    });
+
+    it('on a later page: the pages so far on stdout, exit 12 tool_ran with partial_result', async () => {
+      lockOnCall(2);
+      const res = await call('list_widgets', {}, ['--all-pages', '--max-credits', '50']);
+      const error = expectError(res, 12, 'local_state_error');
+      expect(error.details).toMatchObject({ kind: 'budget_write_failed', tool_ran: true, partial_result: true, pages_fetched: 2 });
+      expect(server.toolCalls().length).toBe(2);
+      const out = JSON.parse(res.stdout) as Record<string, unknown>;
+      expect(ns(out.widgets)).toEqual(range(6));
+      expect(out).toMatchObject({ pages_fetched: 2, truncated: true, truncated_reason: 'local_state_error' });
+    });
+  });
+
   it('a malformed later page stops with exit 3 and keeps page 1', async () => {
     server.handlers.set('list_widgets', topHandler({ rows: 30, special: { 2: textResult({ oops: true }, 1) } }));
     const res = await call('list_widgets', {}, ['--all-pages']);
