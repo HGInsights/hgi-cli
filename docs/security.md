@@ -21,6 +21,7 @@
 - Stored under `~/.config/hgi/` (or `$XDG_CONFIG_HOME/hgi`), never in a project directory. `HGI_CONFIG_DIR`, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` overrides inside a git working tree are refused.
 - One file per server, and a token is only ever sent to the server it was issued by. OAuth endpoints found through discovery must be on the same origin as the base URL, and `hgi` never follows an HTTP redirect on an auth or MCP request, so a token cannot be replayed to another host.
 - Several `hgi` processes share a lock around refresh, so parallel commands do not invalidate each other's sessions.
+- Run-cap budget files (`hgi call --max-credits`) live in `~/.config/hgi/budgets/`, with the same protections as the credentials file (mode `0600` in a `0700` directory, atomic writes, symlinks refused, a lock across processes). They are named by a hash of the budget id and hold spend counters only, no tokens.
 
 ## Signing in and out
 

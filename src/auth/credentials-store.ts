@@ -214,7 +214,7 @@ const LOCK_OPTIONS = {
   retries: { retries: 60, factor: 1.4, minTimeout: 100, maxTimeout: 1_500, randomize: true },
 } as const;
 
-function stampOwner(ownerPath: string, nonce: string): void {
+function stampOwner(ownerPath: string, nonce: string, label: string): void {
   let fd: number | undefined;
   try {
     fd = fs.openSync(
@@ -225,7 +225,7 @@ function stampOwner(ownerPath: string, nonce: string): void {
     if (!fs.fstatSync(fd).isFile()) throw new Error('not a regular file');
     fs.writeFileSync(fd, nonce);
   } catch (err) {
-    throw new HgiError('local_state_error', `Could not stamp the credentials lock (${ownerPath}): ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}.`, {
+    throw new HgiError('local_state_error', `Could not stamp the ${label} lock (${ownerPath}): ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}.`, {
       hint: `Remove ${ownerPath} if it is not a regular file, then retry.`,
       details: { kind: 'lock_timeout' },
       cause: err,
@@ -259,7 +259,12 @@ export interface LockTiming {
   update: number;
 }
 
-export async function withLock<T>(file: string, fn: (lock: HeldLock) => Promise<T>, timing?: LockTiming): Promise<T> {
+export async function withLock<T>(
+  file: string,
+  fn: (lock: HeldLock) => Promise<T>,
+  timing?: LockTiming,
+  label = 'credentials',
+): Promise<T> {
   ensureDir(path.dirname(file));
   let compromised: unknown;
   let release: () => Promise<void>;
@@ -281,7 +286,7 @@ export async function withLock<T>(file: string, fn: (lock: HeldLock) => Promise<
         cause: err,
       });
     }
-    throw new HgiError('local_state_error', `Could not take the credentials lock: ${(err as NodeJS.ErrnoException).code ?? 'error'}.`, {
+    throw new HgiError('local_state_error', `Could not take the ${label} lock: ${(err as NodeJS.ErrnoException).code ?? 'error'}.`, {
       details: { kind: 'lock_timeout' },
       cause: err,
     });
@@ -293,7 +298,7 @@ export async function withLock<T>(file: string, fn: (lock: HeldLock) => Promise<
   const ownerPath = `${file}.lock-owner`;
   const nonce = randomUrlSafe(12);
   const lost = (cause: unknown): HgiError =>
-    new HgiError('local_state_error', 'The credentials lock was lost while hgi was working (the process stalled for too long).', {
+    new HgiError('local_state_error', `The ${label} lock was lost while hgi was working (the process stalled for too long).`, {
       hint: 'Another hgi process may have taken over. Re-run your command.',
       details: { kind: 'lock_compromised' },
       cause,
@@ -314,7 +319,7 @@ export async function withLock<T>(file: string, fn: (lock: HeldLock) => Promise<
   };
   let stamped = false;
   try {
-    stampOwner(ownerPath, nonce);
+    stampOwner(ownerPath, nonce, label);
     stamped = true;
     return await fn(held);
   } finally {

@@ -76,6 +76,7 @@ hgi auth login --no-browser          # prints a URL; open it anywhere, then past
 | `hgi call <tool> --input '<json>'` | run a read-only tool |
 | `hgi call <tool> --ids @file` | run a read-only batch tool over a list of HG ids or domains, one row per line |
 | `hgi run <tool> --input '<json>'` | run a state-changing tool |
+| `hgi budget status` / `hgi budget reset` | what this run has spent against `hgi call --max-credits`, and starting the count over (local only) |
 | `hgi skill install` | copy the agent skill to `~/.claude/skills/hgi` |
 
 Options for `call`, `run` and `tools list`:
@@ -149,6 +150,8 @@ Each row is `{"input": "<your line>", "result": {...}}` or `{"input": "<your lin
 | `NODE_EXTRA_CA_CERTS` | extra CA bundle for corporate TLS inspection |
 | `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` | move `~/.config/hgi` and `~/.cache/hgi` |
 | `HGI_CONFIG_DIR`, `HGI_CACHE_DIR` | explicit directories (must not be inside a git working tree) |
+| `HGI_MAX_CREDITS` | run cap for `hgi call`, same as `--max-credits` (the flag wins). See [Run cap](docs/exit-codes.md#run-cap) |
+| `HGI_BUDGET_ID` | the run a capped `hgi call` counts against (default: the parent process id) |
 
 `hgi` sends the User-Agent `hgi/<version>` and has no telemetry: it talks only to the server you configure, and sends nothing to HG Insights or anyone else about how you use it.
 

@@ -473,3 +473,64 @@ describe('Story 6: know what the run cost', () => {
     expect(res.stderr).not.toMatch(/batch \d+\/\d+/);
   });
 });
+
+describe('the run cap (--max-credits) with --ids', () => {
+  const capEnv = () => ({ ...sb.env, HGI_BUDGET_ID: 'batch' });
+  const capped = (list: string[], max: string) => runCli(['call', BATCH, '--ids', `@${idsFile(list)}`, '--max-credits', max], capEnv());
+  const budgetStatus = async () => {
+    const res = await runCli(['budget', 'status'], capEnv());
+    expect(res.code, res.stderr).toBe(0);
+    return JSON.parse(res.stdout) as Record<string, unknown>;
+  };
+
+  beforeEach(() => setTool(batchTool(), (a) => echo(a, 2)));
+
+  it('checks and counts every batch call', async () => {
+    const res = await capped(ids(60), '100');
+    expect(res.code, res.stderr).toBe(0);
+    expect(rows(res)).toHaveLength(60);
+    expect(await budgetStatus()).toMatchObject({ spent: 6, calls: 3 });
+  });
+
+  it('stops before the batch that would start over the cap; the rows so far stay printed', async () => {
+    const res = await capped(ids(60), '3');
+    expect(res.code, res.stderr).toBe(13);
+    expect(server.toolCalls()).toHaveLength(2);
+    expect(rows(res)).toHaveLength(50);
+    const { error } = errorBody(res);
+    expect(error.code).toBe('budget_exceeded');
+    expect(error.details).toMatchObject({ spent: 4, max: 3, budget_id: 'batch', rows_emitted: 50, calls_made: 2 });
+    expect(error.hint).toMatch(/nothing more was sent/);
+  });
+
+  it('--max-credits 0 sends nothing', async () => {
+    const res = await capped(ids(5), '0');
+    expect(res.code, res.stderr).toBe(13);
+    expect(server.toolCalls()).toHaveLength(0);
+  });
+
+  describe.skipIf(process.getuid?.() === 0)('a budget write that fails after a batch call', () => {
+    const budgetsDir = () => path.join(sb.configDir, 'budgets');
+    afterEach(() => {
+      try {
+        fs.chmodSync(budgetsDir(), 0o700);
+      } catch {
+        // never created
+      }
+    });
+
+    it('prints that batch’s rows, then stops with exit 12 tool_ran', async () => {
+      setTool(batchTool(), (a) => {
+        fs.chmodSync(budgetsDir(), 0o500);
+        return echo(a, 2);
+      });
+      const res = await capped(ids(60), '100');
+      expect(res.code, res.stderr).toBe(12);
+      expect(server.toolCalls()).toHaveLength(1);
+      expect(rows(res)).toHaveLength(25);
+      const { error } = errorBody(res);
+      expect(error.details).toMatchObject({ kind: 'budget_write_failed', tool_ran: true, rows_emitted: 25, calls_made: 1 });
+      expect(error.hint).toMatch(/Do NOT re-run/);
+    });
+  });
+});

@@ -148,13 +148,20 @@ Not null, but easy to misread:
 | 2 | invalid input or usage | fix the input; the JSON error lists the problem fields |
 | 3 | the tool reported an error | read the message; do not blindly retry |
 | 4 | not signed in, or login expired | ask the user to run `hgi auth login` |
+| 4 `phoenix_account_required` | the signed-in identity has no Phoenix account | stop; tell the user to sign up, or to sign in with `hgi auth login` as an account that has one |
 | 5 | rate limited | wait `retry_after_seconds` from the error, then retry |
-| 6 | out of credits | stop; tell the user. Retrying will not help |
+| 6 | out of credits: `credit_limit_exceeded` (the organization) or `user_credit_limit_exceeded` (the user's personal budget) | stop; tell the user which one, and to ask an admin. Retrying will not help |
 | 7 | server unreachable | retry later. If `outcome_unknown` is `true`, check state before re-running a `run` |
+| 7 `governance_unavailable` | the server could not check the budget; nothing ran (`retryable: true`) | wait a little, then retry once; hgi never retries it itself |
 | 8 | OAuth or sign-in failure | ask the user to run `hgi auth login` again |
 | 9 | proxy or TLS problem | the error names the cause (see `NODE_EXTRA_CA_CERTS`, `HTTPS_PROXY`). After a `run`, check `outcome_unknown` before retrying |
 | 10 | wrong verb | use the verb the error names |
-| 11 | forbidden | the account or organization lacks access |
+| 11 | forbidden, or `tool_not_enabled_for_team` | the account, organization or team lacks access to this tool; stop and tell the user to ask an admin |
 | 12 | local credential or file problem | follow the hint. If `details.tool_ran` is `true`, the tool already ran and its result is on stdout: do not re-run it |
+| 13 `budget_exceeded` | the run spent its `--max-credits` cap; nothing more was sent (with `--ids`, keep the rows already printed) | stop; tell the user what was spent (`details.spent` of `details.max`). Only the user raises the cap or runs `hgi budget reset` |
 
-Errors are JSON on stderr when it is not a terminal: `{"schema":1,"error":{"code","exit_code","message","hint","details"}}`.
+Errors are JSON on stderr when it is not a terminal: `{"schema":1,"error":{"code","exit_code","message","hint","details"}}`. Branch on `error.code`, not on the message.
+
+## Run cap
+
+When the user gives a credit limit for a task, pass it as `hgi call --max-credits <n>` (or set `HGI_MAX_CREDITS`). It counts every `hgi call` in one budget; `hgi run` is not counted. **Run `export HGI_BUDGET_ID=<something unique to the task>` once first:** agent harnesses usually start a fresh shell per command, and the default budget (the parent process) would then give every call its own empty budget. The cap is client-side, on top of the server's limits, and can overshoot by the calls running at the same time. `hgi budget status` shows what the task has spent.

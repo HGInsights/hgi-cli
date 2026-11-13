@@ -44,14 +44,21 @@ describe('redact', () => {
 });
 
 describe('exit codes', () => {
-  it('are distinct per failure class except login_required/login_expired', () => {
+  it('are distinct per failure class, except the documented groups that share one', () => {
+    const shared: Record<number, string[]> = {
+      4: ['login_expired', 'login_required', 'phoenix_account_required'],
+      6: ['credit_limit_exceeded', 'user_credit_limit_exceeded'],
+      7: ['governance_unavailable', 'server_unreachable'],
+      11: ['forbidden', 'tool_not_enabled_for_team'],
+    };
     const codes = Object.entries(ERROR_EXIT);
     const byExit = new Map<number, string[]>();
     for (const [slug, n] of codes) byExit.set(n, [...(byExit.get(n) ?? []), slug]);
     for (const [n, slugs] of byExit) {
-      if (n === 4) expect(slugs.sort()).toEqual(['login_expired', 'login_required']);
+      if (shared[n]) expect(slugs.sort()).toEqual(shared[n]);
       else expect(slugs).toHaveLength(1);
     }
+    expect(ERROR_EXIT.budget_exceeded).toBe(13);
   });
 });
 

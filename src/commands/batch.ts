@@ -1,5 +1,6 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { protectedDirs } from '../config.js';
+import { checkBudget, recordSpend } from '../budget.js';
 import { HgiError, toHgiError } from '../errors.js';
 import { parseCsvColumn, parseIdLines, type IdLine } from '../batch/ids.js';
 import { batchFields, buildBatches, entriesKey, matchEntries, type Batch, type BatchPlan, type UniqueInput } from '../batch/plan.js';
@@ -30,6 +31,8 @@ export interface BatchOptions {
   out?: string;
   meta?: boolean;
   validate: boolean;
+  /** The run cap (`--max-credits`): checked before every batch call, and each call's cost recorded after it. */
+  budget?: { id: string; max: number };
 }
 
 interface RowError {
@@ -147,17 +150,37 @@ function rowError(code: string, message: string): RowError {
   return { code, message: redact(message) };
 }
 
-async function callBatch(run: Run, session: McpSession, tool: McpTool, input: Record<string, unknown>, batch: Batch, key: string): Promise<void> {
+/**
+ * Sends one batch. Returns the error from recording its spend under a run cap, if that failed: the caller
+ * prints this batch's rows first, then stops the run with it.
+ */
+async function callBatch(
+  run: Run,
+  session: McpSession,
+  tool: McpTool,
+  input: Record<string, unknown>,
+  batch: Batch,
+  key: string,
+  budget: BatchOptions['budget'],
+): Promise<HgiError | null> {
   run.callsMade += 1;
   let result: CallToolResult | undefined;
+  let budgetFailure: HgiError | null = null;
   try {
     result = await session.callTool(tool.name, argsFor(input, batch));
     run.addCost(result);
+    if (budget) {
+      try {
+        await recordSpend(budget.id, budget.max, creditCostOf(result));
+      } catch (err) {
+        budgetFailure = toHgiError(err);
+      }
+    }
     const outcome = interpretResult(result, tool.name);
     const index = matchEntries(batch.kind, outcome.value, key);
     if (!index) {
       run.failBatch(batch, rowError('unexpected_response', `The response has no "${key}" array to match inputs against.`));
-      return;
+      return budgetFailure;
     }
     for (const u of batch.items) {
       const entry = index.get(u.norm);
@@ -166,8 +189,28 @@ async function callBatch(run: Run, session: McpSession, tool: McpTool, input: Re
   } catch (raw) {
     if (!result) run.addCost(undefined);
     const err = toHgiError(raw);
-    if (err.code !== 'tool_error' || err.details?.outcome_unknown === true) throw err;
+    if (err.code !== 'tool_error' || err.details?.outcome_unknown === true) {
+      // A server refusal stays the error the caller acts on; a failed budget write is only flagged on it.
+      if (budgetFailure) throw new HgiError(err.code, err.message, { hint: err.hint, details: { ...err.details, budget_write_failed: true }, cause: err });
+      throw err;
+    }
     run.failBatch(batch, rowError(err.code, err.message));
+  }
+  return budgetFailure;
+}
+
+/** Before every batch after the first (the first is checked before anything is sent): refuses once the run cap is spent. */
+async function checkBatchBudget(budget: NonNullable<BatchOptions['budget']>, run: Run): Promise<void> {
+  try {
+    await checkBudget(budget.id, budget.max);
+  } catch (raw) {
+    const err = toHgiError(raw);
+    if (err.code !== 'budget_exceeded') throw err;
+    throw new HgiError(err.code, err.message, {
+      hint: `${run.callsMade} batch call(s) already ran and their rows were printed; nothing more was sent. Keep those rows, raise --max-credits or run \`hgi budget reset\`, then resume from the rest.`,
+      details: err.details,
+      cause: err,
+    });
   }
 }
 
@@ -232,9 +275,17 @@ export async function runBatch(session: McpSession, tool: McpTool, input: Record
 
   try {
     for (const [i, batch] of plan.batches.entries()) {
+      if (opts.budget && i > 0) await checkBatchBudget(opts.budget, run);
       if (process.stderr.isTTY) process.stderr.write(`hgi: batch ${i + 1}/${plan.batches.length}\n`);
-      await callBatch(run, session, tool, input, batch, key);
+      const budgetFailure = await callBatch(run, session, tool, input, batch, key, opts.budget);
       await run.flush(opts.select);
+      if (budgetFailure) {
+        throw new HgiError('local_state_error', `The batch call ran, but ${budgetFailure.message.replace(/^Could not/, 'hgi could not')}`, {
+          hint: 'Every call so far already ran and was billed, and its rows were printed. Do NOT re-run them. Check the budget with `hgi budget status`.',
+          details: { kind: 'budget_write_failed', tool_ran: true },
+          cause: budgetFailure,
+        });
+      }
     }
   } catch (raw) {
     const err = toHgiError(raw);
