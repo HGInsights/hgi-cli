@@ -28,6 +28,21 @@ npm view @hginsights/hgi dist.attestations    # provenance attestation for the p
 
 Each release also attaches a CycloneDX SBOM. See [SECURITY.md](SECURITY.md) and [docs/releasing.md](docs/releasing.md).
 
+### Upgrading
+
+`hgi` has no self-update command. Upgrade it the way you installed it:
+
+```bash
+brew update && brew upgrade hginsights/tap/hgi   # Homebrew: refresh the tap first, or brew won't see the new version
+npm install -g @hginsights/hgi@latest            # npm: keep the -g, a plain `npm i` installs into the current directory
+# tarball: download the new release and replace the `hgi` on your PATH
+hgi --version
+```
+
+If `hgi --version` still shows the old version, `which -a hgi` lists every copy on your PATH and the first one wins. Keep a single install: run `brew uninstall hgi` or `npm uninstall -g @hginsights/hgi` to remove the one you don't use.
+
+`hgi skill install` copies the agent skill, so the copy doesn't change when you upgrade. Run `hgi skill install --force` afterwards to pick up the new version's skill.
+
 ### Troubleshooting
 
 - The binary and the npm install both honor `NODE_OPTIONS`. If your shell exports `--require` or `--import` hooks (for example a tracer), `hgi` can fail to start: run `env -u NODE_OPTIONS hgi ...`.
