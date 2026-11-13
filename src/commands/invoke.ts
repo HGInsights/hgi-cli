@@ -16,6 +16,7 @@ import { applySelect } from '../output/select.js';
 import { emit, preflightOutput } from './emit.js';
 import { preflightBatchFlags, readIds, runBatch } from './batch.js';
 import { readStdin, reportCredit } from './io.js';
+import { assertPageable, preflightPaging, runAllPages, type PagingContext } from './paging.js';
 
 interface InvokeOptions {
   input?: string;
@@ -31,6 +32,8 @@ interface InvokeOptions {
   ids?: string;
   idsColumn?: string;
   batchSize?: string;
+  allPages?: boolean;
+  maxPages?: string;
 }
 
 export function parseTimeoutMs(raw: string): number {
@@ -85,7 +88,13 @@ export function assertVerb(requested: Verb, tool: McpTool): void {
 }
 
 /** The tool ran, but its spend could not be recorded: print the result to stdout (never only to --out), then exit 12. */
-async function failAfterBudgetWrite(cause: HgiError, value: unknown, opts: InvokeOptions, creditCost: number | null): Promise<never> {
+async function failAfterBudgetWrite(
+  cause: HgiError,
+  value: unknown,
+  opts: InvokeOptions,
+  creditCost: number | null,
+  extraDetails: Record<string, unknown> = {},
+): Promise<never> {
   try {
     await emit(value, { format: opts.format });
   } catch {
@@ -95,14 +104,86 @@ async function failAfterBudgetWrite(cause: HgiError, value: unknown, opts: Invok
   }
   throw new HgiError('local_state_error', `The tool ran, but ${cause.message.replace(/^Could not/, 'hgi could not')}`, {
     hint: 'The tool already ran and was billed; its result was printed to stdout. Do NOT re-run it. Check the budget with `hgi budget status`.',
-    details: { kind: 'budget_write_failed', tool_ran: true },
+    details: { kind: 'budget_write_failed', tool_ran: true, ...extraDetails },
     cause,
+  });
+}
+
+/** Writes a result to `--out` or stdout. If `--out` fails after the tool ran, prints to stdout and exits 12 `tool_ran`. */
+async function emitResult(value: unknown, verb: Verb, opts: InvokeOptions, creditCost: number | null): Promise<void> {
+  try {
+    await emit(value, { format: opts.format, out: opts.out, force: opts.force, allowForce: verb === 'run' });
+  } catch (err) {
+    if (!opts.out) throw err;
+    const cause = toHgiError(err);
+    try {
+      await emit(value, { format: opts.format });
+    } catch {
+      // stdout is gone too; the tool still ran, so keep the error below
+    }
+    throw new HgiError('local_state_error', `The tool ran, but its result could not be written to ${opts.out}: ${cause.message}`, {
+      hint: 'The tool already ran and was billed; its result was printed to stdout instead. Do NOT re-run it.',
+      details: { kind: 'write_failed', reason: cause.details?.reason ?? cause.code, tool_ran: true },
+      cause: err,
+    });
+  } finally {
+    reportCredit(creditCost);
+  }
+}
+
+/**
+ * `hgi call --all-pages`: fetches every page and prints the merged result like a single result. After a later-page
+ * failure, the merged result so far is printed where a full one would go, then the failing call's error is thrown
+ * with `partial_result` and `pages_fetched`.
+ */
+async function runPaged(ctx: PagingContext, verb: Verb, opts: InvokeOptions, mcpVersion: () => string | null): Promise<void> {
+  const paged = await runAllPages(ctx);
+  const selected = applySelect(paged.value, opts.select);
+  const value = opts.meta
+    ? {
+        result: selected,
+        credit_cost: paged.creditCost,
+        mcp_version: mcpVersion(),
+        pages_fetched: paged.callsMade,
+        calls_without_cost: paged.callsWithoutCost,
+      }
+    : selected;
+  const failure = paged.failure;
+  if (!failure) {
+    await emitResult(value, verb, opts, paged.creditCost);
+    return;
+  }
+  const partial = { partial_result: true, pages_fetched: paged.callsMade };
+  if (failure.code === 'local_state_error' && failure.details?.kind === 'budget_write_failed') {
+    await failAfterBudgetWrite(failure, value, opts, paged.creditCost, partial);
+  }
+  let outFailed = false;
+  try {
+    await emit(value, { format: opts.format, out: opts.out, force: opts.force, allowForce: verb === 'run' });
+  } catch {
+    if (opts.out) {
+      outFailed = true;
+      try {
+        await emit(value, { format: opts.format });
+      } catch {
+        // stdout is gone too; the original error below still says what happened
+      }
+    }
+  } finally {
+    reportCredit(paged.creditCost);
+  }
+  const resultWent = outFailed || !opts.out ? 'stdout' : opts.out;
+  throw new HgiError(failure.code, failure.message, {
+    hint: `${failure.hint ? `${failure.hint} ` : ''}The pages fetched so far were written to ${resultWent}, with the unfinished parts marked truncated. Do NOT re-run the pages already fetched; they were billed.`,
+    details: { ...failure.details, ...partial, ...(outFailed ? { out_write_failed: true } : {}) },
+    cause: failure,
   });
 }
 
 async function runInvoke(verb: Verb, toolName: string, opts: InvokeOptions, cmd: Command): Promise<void> {
   const batchSize = preflightBatchFlags(opts);
   const input = await readInput(opts.input);
+  const maxPages = verb === 'call' ? preflightPaging(opts, input) : null;
   preflightOutput({ format: opts.format, select: opts.select, out: opts.out, force: opts.force, allowForce: verb === 'run' });
   const timeoutMs = parseTimeoutMs(opts.timeout);
   const label = parseLabel(opts.label);
@@ -160,6 +241,26 @@ async function runInvoke(verb: Verb, toolName: string, opts: InvokeOptions, cmd:
       });
       return;
     }
+    if (maxPages !== null) {
+      const spec = assertPageable(tool);
+      if (opts.validate) assertValidInput(tool, input);
+      await runPaged(
+        {
+          session,
+          tool,
+          input,
+          spec,
+          maxPages,
+          validate: opts.validate,
+          budget: budgetId !== null && maxCredits !== null ? { id: budgetId, max: maxCredits } : undefined,
+          onResult: recordUsage,
+        },
+        verb,
+        opts,
+        () => session.state.mcpVersion,
+      );
+      return;
+    }
     if (opts.validate) assertValidInput(tool, input);
 
     const result = await session.callTool(toolName, input);
@@ -187,29 +288,7 @@ async function runInvoke(verb: Verb, toolName: string, opts: InvokeOptions, cmd:
       ? { result: selected, credit_cost: outcome.creditCost, mcp_version: session.state.mcpVersion }
       : selected;
     if (budgetFailure) await failAfterBudgetWrite(budgetFailure, value, opts, outcome.creditCost);
-    try {
-      await emit(value, {
-        format: opts.format,
-        out: opts.out,
-        force: opts.force,
-        allowForce: verb === 'run',
-      });
-    } catch (err) {
-      if (!opts.out) throw err;
-      const cause = toHgiError(err);
-      try {
-        await emit(value, { format: opts.format });
-      } catch {
-        // stdout is gone too; the tool still ran, so keep the error below
-      }
-      throw new HgiError('local_state_error', `The tool ran, but its result could not be written to ${opts.out}: ${cause.message}`, {
-        hint: 'The tool already ran and was billed; its result was printed to stdout instead. Do NOT re-run it.',
-        details: { kind: 'write_failed', reason: cause.details?.reason ?? cause.code, tool_ran: true },
-        cause: err,
-      });
-    } finally {
-      reportCredit(outcome.creditCost);
-    }
+    await emitResult(value, verb, opts, outcome.creditCost);
   } finally {
     await session.close();
   }
@@ -239,6 +318,11 @@ export function registerInvokeCommands(program: Command): void {
         .option('--ids-column <name>', 'with --ids, read the file as CSV with a header row and take ids from this column')
         .option('--batch-size <n>', "with --ids, send fewer ids per call than the tool's limit")
         .option('--max-credits <n>', 'stop this run once it has spent n credits (also $HGI_MAX_CREDITS; the flag wins)')
+        .option(
+          '--all-pages',
+          'fetch every page of an offset-paged tool and print one merged result; each extra page is a separate, billed call (batch tools: one call per company)',
+        )
+        .option('--max-pages <n>', 'with --all-pages, fetch at most n pages per page object, page 1 included (default 10)')
         .addHelpText(
           'after',
           [
@@ -248,6 +332,14 @@ export function registerInvokeCommands(program: Command): void {
             '  HGI_BUDGET_ID                        the run to count against (default: the parent process id, so one shell or script)',
             '  `hgi budget status` shows the spend; `hgi budget reset` starts it over.',
             '  With --ids, every batch call is checked and counted.',
+            '',
+            'Paging (--all-pages):',
+            '  Only tools whose schemas show an integer "offset" input and a rows array with has_more or a total.',
+            '  Pages are fetched one at a time. Each extra page is a separate, billed call; for batch tools',
+            '  (hg_ids/domains), follow-ups go one call per company. Paging stops on has_more: false, an empty or',
+            '  short page, the total reached, or --max-pages (default 10). A stopped-early part says',
+            '  truncated: true and truncated_reason. A later-page failure prints the pages so far, then exits',
+            "  with that failure's code and details.partial_result: true. The run cap is checked before every page.",
           ].join('\n'),
         );
     }
