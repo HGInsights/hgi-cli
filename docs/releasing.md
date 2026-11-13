@@ -57,6 +57,8 @@ Verify these npm steps against npm's current documentation when you do them; the
 
 ## Cutting a release
 
+In Claude Code, `/release` (`.claude/commands/release.md`) runs these steps. It stops for the bump PR's review, asks before every tag push, and leaves the `release` environment approval and the clean-machine checks to a person. Run it again with no arguments to resume a release in progress.
+
 1. Bump `version` in `package.json` (and `npm-shrinkwrap.json`: `npm install --package-lock-only`), open a PR, merge it.
 2. **Rehearse** with a release candidate: bump to `X.Y.Z-rc.1`, merge, tag `vX.Y.Z-rc.1`. This does everything for real (GitHub prerelease, smoke tests on all four platforms, `brew install` of the rendered formula, npm publish under dist-tag `next` with provenance) except opening the Homebrew PR.
 3. Run `scripts/verify-release.sh vX.Y.Z-rc.1 --route binary|npm` on clean machines.

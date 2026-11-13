@@ -67,6 +67,10 @@ review → implement → code review → `/create-pr` → post-PR review → CI 
 - **Questions** follow `.claude/skills/runbooks/operator-questions.md`:
   `AskUserQuestion` only, tagged, answerable on its own, one decision each.
   Technical ones go to the `decision-consult` agent first.
+- **Releases**: `/release [patch|minor|major|X.Y.Z] [--skip-rc]` runs
+  `docs/releasing.md` → "Cutting a release": bump PR, rc, tag, watch the
+  release workflow, release notes, tap PR checksums. It asks before every
+  tag push and never approves the `release` environment itself.
 - **Dev docs**: `/fix-issue` writes `dev/active/issue-<N>/` (gitignored) and
   archives it to `dev/completed/`. `context.md` → `## Implementation Summary`
   is the recovery record after a compaction or a crash.
