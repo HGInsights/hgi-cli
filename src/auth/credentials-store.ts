@@ -215,9 +215,14 @@ export interface HeldLock {
   remove(): void;
 }
 
-export async function withLock<T>(file: string, fn: (lock: HeldLock) => Promise<T>, timing?: LockTiming): Promise<T> {
+export async function withLock<T>(
+  file: string,
+  fn: (lock: HeldLock) => Promise<T>,
+  timing?: LockTiming,
+  label = 'credentials',
+): Promise<T> {
   ensureDir(path.dirname(file));
-  return withFileLock(file, { label: 'credentials', retries: LOCK_RETRIES, timing }, (lock) => {
+  return withFileLock(file, { label, retries: LOCK_RETRIES, timing }, (lock) => {
     const held: HeldLock = {
       assertHeld: () => lock.assertHeld(),
       write(creds, hooks) {

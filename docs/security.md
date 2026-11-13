@@ -21,6 +21,7 @@
 - Stored under `~/.config/hgi/` (or `$XDG_CONFIG_HOME/hgi`), never in a project directory. `HGI_CONFIG_DIR`, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` overrides inside a git working tree are refused.
 - One file per server, and a token is only ever sent to the server it was issued by. OAuth endpoints found through discovery must be on the same origin as the base URL, and `hgi` never follows an HTTP redirect on an auth or MCP request, so a token cannot be replayed to another host.
 - Several `hgi` processes share a lock around refresh, so parallel commands do not invalidate each other's sessions.
+- Run-cap budget files (`hgi call --max-credits`) live in `~/.config/hgi/budgets/`, with the same protections as the credentials file (mode `0600` in a `0700` directory, atomic writes, symlinks refused, a lock across processes). They are named by a hash of the budget id and hold spend counters only, no tokens.
 
 ## Signing in and out
 
@@ -38,8 +39,8 @@
 ## What `call` and `run` do
 
 - `hgi call` only runs tools the server marks `readOnlyHint: true`, decided against a fresh tool list on every invocation. `hgi run` runs everything else, including tools with no annotations. There is no `--yes` flag, so a host permission rule on `hgi call *` approves only lookups.
-- `--out <file>` never overwrites an existing file on `hgi call`, never follows symlinks, and refuses paths inside hgi's config and cache directories. `--input @file` refuses hgi's own credential and cache files (including through symlinks and hard links). An allowlisted agent can still write a **new** file or send any other file it can read to HG Insights as tool input; scope your allowlist accordingly.
-- Credit cost is reported after each call and recorded in the local [credit ledger](#the-credit-ledger). Credits are billed to your organization.
+- `--out <file>` never overwrites an existing file on `hgi call`, never follows symlinks, and refuses paths inside hgi's config and cache directories. `--input @file` and `--ids @file` refuse hgi's own credential and cache files (including through symlinks and hard links), and read only regular files. An allowlisted agent can still write a **new** file or send any other file it can read to HG Insights as tool input; scope your allowlist accordingly.
+- Credit cost is reported after each call (with `--ids`, once for the whole run) and recorded in the local [credit ledger](#the-credit-ledger), one line per call (with `--ids`, one per batch call). Credits are billed to your organization. `--ids` sends batches one at a time and stops at the first fatal error, so a run that hits a credit limit or an expired sign-in does not keep sending.
 
 ## The credit ledger
 

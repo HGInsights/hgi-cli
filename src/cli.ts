@@ -1,6 +1,7 @@
 import { Command, CommanderError } from 'commander';
 import { VERSION } from './config.js';
 import { registerAuthCommands } from './commands/auth.js';
+import { registerBudgetCommands } from './commands/budget.js';
 import { registerInvokeCommands } from './commands/invoke.js';
 import { registerSkillCommands } from './commands/skill.js';
 import { registerToolsCommands } from './commands/tools.js';
@@ -25,6 +26,7 @@ export function buildProgram(): Command {
   registerToolsCommands(program);
   registerInvokeCommands(program);
   registerUsageCommands(program);
+  registerBudgetCommands(program);
   registerSkillCommands(program);
   return program;
 }

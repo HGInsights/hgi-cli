@@ -62,7 +62,8 @@ Verify these npm steps against npm's current documentation when you do them; the
 3. Run `scripts/verify-release.sh vX.Y.Z-rc.1 --route binary|npm` on clean machines.
 4. Bump to `X.Y.Z`, merge, tag `vX.Y.Z`. This publishes `latest` and opens the tap PR; merge it after checking the checksums match.
 5. Run `scripts/verify-release.sh vX.Y.Z --route brew|binary|npm` on a clean macOS and a clean Linux machine and paste the output into the tracking issue.
-6. After the first release: add a `compat-previous-release` CI job that runs the previous release's binary against the current fake-server fixtures (`docs/compatibility.md` promises it from `v0.1.1`).
+6. Check that the GitHub release notes carry the line telling users who installed the agent skill to run `hgi skill install --force` after upgrading. If `skills/hgi/SKILL.md` changed since the previous release (`git diff --stat vPREV vX.Y.Z -- skills/hgi/SKILL.md`), say so at the top of the notes (`gh release edit vX.Y.Z --notes-file …`): an installed copy is not updated until the user runs that command.
+7. After the first release: add a `compat-previous-release` CI job that runs the previous release's binary against the current fake-server fixtures (`docs/compatibility.md` promises it from `v0.1.1`).
 
 Dry run at any time: Actions > Release > Run workflow (builds and packages everything; nothing is published).
 
