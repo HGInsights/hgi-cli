@@ -6,8 +6,8 @@ Every failure has its own exit code, so a script can branch without parsing Engl
 |---|---|---|
 | 0 | | success |
 | 1 | `internal_error` | a bug in `hgi`. Never used for a server response or a usage error |
-| 2 | `invalid_input` | bad flags or usage; invalid JSON; input that fails the tool's schema; unknown tool; unreadable `--input @file`; `--out` refusals (exists, symlink, protected path, `--force` on `call`); config-dir workspace guard |
-| 3 | `tool_error` | the tool returned `isError` (including server-side invalid arguments, which the server reports in-band), a JSON-RPC error, or a response `hgi` could not parse after the call was sent |
+| 2 | `invalid_input` | bad flags or usage; invalid JSON; input that fails the tool's schema; unknown tool; unreadable `--input @file` or `--ids @file`; `--out` refusals (exists, symlink, protected path, `--force` on `call`); config-dir workspace guard; any `--ids` refusal (see [below](#partial-output-from---ids)). Nothing is sent |
+| 3 | `tool_error` | the tool returned `isError` (including server-side invalid arguments, which the server reports in-band), a JSON-RPC error, or a response `hgi` could not parse after the call was sent. With `--ids`: at least one batch call failed (every row is printed first) |
 | 4 | `login_required`, `login_expired`, `phoenix_account_required` | no credentials; a second 401 after one refresh; the refresh token was rejected (`invalid_grant`). `phoenix_account_required`: the server says the signed-in identity has no Phoenix account; sign up, or sign in with `hgi auth login` as an account that has one |
 | 5 | `rate_limited` | 429 after bounded retries (MCP calls); a 429 from the userinfo or revoke endpoint exits at once |
 | 6 | `credit_limit_exceeded`, `user_credit_limit_exceeded` | the server refused the call: your organization's credit allowance (`credit_limit_exceeded`) or your personal credit budget (`user_credit_limit_exceeded`) is used up. Retrying will not help; ask an admin, or wait for the next billing period |
@@ -23,7 +23,7 @@ Every failure has its own exit code, so a script can branch without parsing Engl
 
 ## The error body
 
-When stderr is not a terminal (or you pass `--json-errors`), errors are one JSON object on stderr and nothing on stdout (the one exception: exit 12 with `details.tool_ran: true`, where the tool already ran and its result is printed on stdout):
+When stderr is not a terminal (or you pass `--json-errors`), errors are one JSON object on stderr and nothing on stdout. There are two exceptions: exit 12 with `details.tool_ran: true`, where the tool already ran and its result is printed on stdout, and `hgi call --ids`, where the rows printed before the error stay on stdout ([below](#partial-output-from---ids)):
 
 ```json
 {"schema":1,"error":{"code":"credit_limit_exceeded","exit_code":6,"message":"...","hint":"...","details":{"tool":"company_enrich"}}}
@@ -46,6 +46,31 @@ When stderr is not a terminal (or you pass `--json-errors`), errors are one JSON
 
 On a terminal, errors are plain text with a hint.
 
+## Partial output from `--ids`
+
+`hgi call --ids` sends one call per batch, one at a time, and prints rows as batches return. How a run ends:
+
+- **0**: every batch call succeeded, even if some rows are `not_found`.
+- **3**: every row was printed, but at least one batch call failed (`isError`, a JSON-RPC error, an unparseable response, or a response with nothing to match against). Those rows carry the error; the run went on with the next batch. `details` has `failed_batches` (how many), `rows_emitted` and `calls_made`.
+- **Any other code stops the run at once** (out of credits, sign-in expired, rate limited, unreachable, proxy/TLS, forbidden, a failure with `outcome_unknown: true`, and any later client-side stop): no further batch is sent and nothing is retried. The rows already printed stay on stdout (for `-f json|csv|yaml|table` and `--out`, the rows so far are written before the error). `details` adds `rows_emitted` (rows printed, in input order) and `calls_made` (`tools/call` requests attempted, including the one that failed), so you know where to resume. If `--out` cannot be written at that point, the rows go to stdout instead and `details.out_write_failed` is `true`; the exit code is still the original one.
+- **12 with `details.tool_ran: true`**: every call ran, but `--out` could not be written at the end; the rows are on stdout. Do not re-run.
+
+Exit 2 refusals specific to `--ids`, each before anything is sent (`details.reason`):
+
+| `reason` | When |
+|---|---|
+| `no_ids` | no ids left after skipping blank lines and `#` comments (or empty CSV cells) |
+| `bad_batch_size` | `--batch-size` is zero, not a whole number, or above the limit of a field the input uses (`details.field`, `details.max`) |
+| `unknown_column` | `--ids-column` names a column the CSV header does not have (`details.columns`) |
+| `bad_csv` | the `--ids-column` file has a quoted field that is never closed |
+| `ids_column_without_ids`, `batch_size_without_ids` | `--ids-column` or `--batch-size` without `--ids` |
+| `bad_ids_source` | `--ids` is not `@file` or `-` |
+| `stdin_conflict` | `--ids -` together with `--input -` |
+| `ids_conflict` | `--input` already has `hg_ids` or `domains` (`details.field`) |
+| `unsupported_kind` | a line is a domain (or an HG id) and the tool's input schema has no `domains` (or `hg_ids`) array (`details.line`) |
+| `unusable_max_items` | the tool declares a `maxItems` that is not a positive whole number, so it cannot be batched safely |
+| `schema` | a batch fails the tool's input schema; `details.batch` says which. Every batch is checked before the first is sent |
+
 ## `outcome_unknown`
 
 `hgi` retries only failures that happen **before the server runs the tool**: a 401 (after a refresh), a 429, the server's 503 "shedding load" response, and a refused or unresolvable connection. If a connection drops, times out, a proxy resets it, or a 5xx arrives **after** a `tools/call` was sent, it is not retried, because `hgi run` could start the work twice. The error then has `"outcome_unknown": true` and a hint to check state first. This marker is added to every network-class or unclassified failure once the call was sent, so it can appear with exit 1, 7 or 9. An exhausted load-shed retry has `"outcome_unknown": false`: nothing ran and retrying is safe.
@@ -61,6 +86,7 @@ Success prints the tool result on stdout and the credit cost on stderr (`credit_
 - The cap is **client-side only, on top of the server's limits**. The organization and personal limits still apply, and are enforced by the server.
 - It covers `hgi call` only. `hgi run` has no `--max-credits`, ignores `HGI_MAX_CREDITS`, and is neither checked nor counted.
 - Before each capped call, `hgi` refuses with exit 13 when the budget has already spent its cap, and sends nothing. After the call, it adds the cost the server reported (`_meta.creditCost`), for error results too. A tool that reports no cost counts as 0 and is counted in `unknown_cost_calls`.
+- With `--ids`, every batch call is a capped call: checked before it is sent and counted after it. When the cap is reached partway, the run stops with exit 13 and the rows so far stay printed, with `rows_emitted` and `calls_made` as in [Partial output from `--ids`](#partial-output-from---ids). When a batch's spend cannot be recorded, its rows are printed first (to `--out` when given), then the run stops with exit 12 `budget_write_failed` and `details.tool_ran: true`.
 - The server gives no price before a call, so a run can overshoot its cap by the calls running at the same time: one call when calls run one after another, more when they run in parallel.
 - Spend is recorded only when a cap is set. It lives in `~/.config/hgi/budgets/` (see [security](security.md)); a file not updated for 7 days is deleted on the next budget write.
 - `hgi budget status [--max-credits <n>]` prints `{budget_id, spent, max, remaining, calls, unknown_cost_calls}`; `hgi budget reset` starts the count over. Neither needs a sign-in or sends anything.

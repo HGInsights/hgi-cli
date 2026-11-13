@@ -28,8 +28,24 @@ npm view @hginsights/hgi dist.attestations    # provenance attestation for the p
 
 Each release also attaches a CycloneDX SBOM. See [SECURITY.md](SECURITY.md) and [docs/releasing.md](docs/releasing.md).
 
+### Upgrading
+
+`hgi` has no self-update command. Upgrade it the way you installed it:
+
+```bash
+brew update && brew upgrade hginsights/tap/hgi   # Homebrew: refresh the tap first, or brew won't see the new version
+npm install -g @hginsights/hgi@latest            # npm: keep the -g, a plain `npm i` installs into the current directory
+# tarball: download the new release and replace the `hgi` on your PATH
+hgi --version
+```
+
+If `hgi --version` still shows the old version, `which -a hgi` lists every copy on your PATH and the first one wins. Keep a single install: run `brew uninstall hgi` or `npm uninstall -g @hginsights/hgi` to remove the one you don't use.
+
+`hgi skill install` copies the agent skill, so the copy doesn't change when you upgrade. Run `hgi skill install --force` afterwards to pick up the new version's skill.
+
 ### Troubleshooting
 
+- **`hgi auth login` ends on a `403 Forbidden` page.** Open a private window (or clear your browser's cookies for phoenix.hginsights.com, or for the host in your `HGI_BASE_URL`), sign in at https://phoenix.hginsights.com (or your `HGI_BASE_URL`) first, then open the URL `hgi auth login` printed in that same window. Sign-in still finishes in the terminal. If `hgi` already timed out, run `hgi auth login` again and open the new URL in that window.
 - The binary and the npm install both honor `NODE_OPTIONS`. If your shell exports `--require` or `--import` hooks (for example a tracer), `hgi` can fail to start: run `env -u NODE_OPTIONS hgi ...`.
 
 ## Quick start
@@ -58,6 +74,7 @@ hgi auth login --no-browser          # prints a URL; open it anywhere, then past
 | `hgi auth logout [--force]` | revoke the session on the server and delete the local credentials |
 | `hgi tools list [--refresh] [--json]` | the tools the server offers you, with `call`/`run`, required fields, schemas and the MCP version |
 | `hgi call <tool> --input '<json>'` | run a read-only tool |
+| `hgi call <tool> --ids @file` | run a read-only batch tool over a list of HG ids or domains, one row per line |
 | `hgi run <tool> --input '<json>'` | run a state-changing tool |
 | `hgi budget status` / `hgi budget reset` | what this run has spent against `hgi call --max-credits`, and starting the count over (local only) |
 | `hgi skill install` | copy the agent skill to `~/.claude/skills/hgi` |
@@ -70,6 +87,12 @@ Options for `call`, `run` and `tools list`:
 - `--out <file>`: write the complete result to a new file.
 - `--meta`: print `{result, credit_cost, mcp_version}`.
 - `--timeout <seconds>`: per-request timeout (default 120).
+
+Options for `call` only (batching):
+
+- `--ids @file` / `--ids -`: one HG id or domain per line, from a file or stdin. Blank lines and `#` lines are skipped. A line with a dot is a domain, anything else an HG id.
+- `--ids-column <name>`: with `--ids`, read the file as CSV with a header row and take the ids from that column.
+- `--batch-size <n>`: send fewer ids per call than the tool's limit (its schema's `maxItems`, or 25).
 
 Global: `--base-url`, `--debug` (tokens are always masked), `--json-errors`.
 
@@ -104,6 +127,17 @@ Failures have distinct exit codes and a stable JSON error on stderr; see [exit c
 hgi call company_enrich --input '{"domain":"acme.com"}' --select name,employees | jq .
 hgi call search_companies --input '{"query":"saas"}' -f csv --out saas.csv
 ```
+
+### Looking up a whole list
+
+`--ids` splits a list into batches the tool accepts, sends them one at a time, and prints one JSONL row per input line, in your file's order, as soon as each batch returns:
+
+```bash
+hgi call company_spend --ids @hg_ids.txt --input '{"category_names":["CRM"]}' > spend.jsonl
+hgi call company_spend --ids @accounts.csv --ids-column hg_id --input '{"category_names":["CRM"]}'
+```
+
+Each row is `{"input": "<your line>", "result": {...}}` or `{"input": "<your line>", "error": {"code": "not_found", "message": "..."}}`, so joining back to your spreadsheet works even when the server drops leading zeros from ids or you wrote `https://www.Example.com/about`. Duplicate lines are sent once and get their row repeated. Running the same file again sends identical batches. The rest of `--input` is sent with every batch. A failed batch marks its rows with the error, the run continues, and the exit code is 3. Out of credits, an expired sign-in or an unreachable server stops the run at once, with the rows so far kept (see [exit codes](docs/exit-codes.md#partial-output-from---ids)). The total credit cost is printed once at the end.
 
 ## Configuration
 

@@ -13,6 +13,7 @@ import {
 } from './credentials-store.js';
 import { parsePastedCallback } from './callback.js';
 import { startLoopback } from './loopback.js';
+import { browserFlowLines, noBrowserForbiddenLine } from './recovery.js';
 import {
   buildAuthorizeUrl,
   discover,
@@ -142,15 +143,15 @@ export async function login(opts: LoginOptions): Promise<LoginResult> {
     say('Open this URL in a browser on any machine and approve access:');
     say(`  ${url}`);
     say('After approving, the browser will fail to load a http://localhost page. Copy that full URL from the address bar.');
+    say(noBrowserForbiddenLine(base));
     const pasted = await readPastedLine('Paste the callback URL: ');
     code = parsePastedCallback(pasted, { redirectUri, state }, { value: false });
   } else {
-    const loop = await startLoopback({ state, timeoutMs: LOGIN_TIMEOUT_MS });
+    const loop = await startLoopback({ state, timeoutMs: LOGIN_TIMEOUT_MS, base });
     try {
       redirectUri = loop.redirectUri;
       const url = buildAuthorizeUrl(meta, base, { redirectUri, state, challenge });
-      say('Opening your browser to sign in. If it does not open, visit:');
-      say(`  ${url}`);
+      for (const line of browserFlowLines(base, url)) say(line);
       openBrowser(url);
       code = await loop.waitForCode();
     } finally {

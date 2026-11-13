@@ -36,6 +36,7 @@ hgi tools list --json                                   # what can I call?
 hgi call company_enrich --input '{"domain":"acme.com"}' # lookup, JSON on stdout
 hgi call search_companies --input '{"query":"saas"}' --select name,domain -f csv
 hgi call <tool> --input '{"limit":100}' --out result.json        # big result to a new file
+hgi call <tool> --ids @hg_ids.txt --input '{...}'        # a whole list: one JSONL row per line
 hgi run <tool> --input '{...}'                           # only after the user approves
 ```
 
@@ -43,6 +44,7 @@ hgi run <tool> --input '{...}'                           # only after the user a
 - Output is JSON when piped and a table on a terminal. Use `-f json|jsonl|csv|yaml|table`.
 - `--select a,b.c` keeps only those fields (dotted paths work through arrays). Prefer it, or `--out <new file>`, for large results; results are never truncated.
 - `--meta` prints `{ "result": ..., "credit_cost": ..., "mcp_version": ... }` on stdout.
+- For more than one company, use `--ids @file` (one HG id or domain per line; `--ids -` for stdin; `--ids-column <name>` for a CSV; `--batch-size <n>` to send fewer per call than the tool's limit) instead of looping. hgi batches by the tool's limit, sends batches one at a time, and prints `{"input", "result"}` or `{"input", "error"}` rows as JSONL in input order. Exit 3 means a batch failed (its rows carry the error, the rest are fine); any other non-zero exit stopped the run, and `details.rows_emitted` / `calls_made` say how far it got: keep the rows already printed and resume from there.
 
 ## Exit codes
 
@@ -65,7 +67,7 @@ hgi run <tool> --input '{...}'                           # only after the user a
 | 10 | wrong verb | use the verb the error names |
 | 11 | forbidden, or `tool_not_enabled_for_team` | the account, organization or team lacks access to this tool; stop and tell the user to ask an admin |
 | 12 | local credential or file problem | follow the hint. If `details.tool_ran` is `true`, the tool already ran and its result is on stdout: do not re-run it |
-| 13 `budget_exceeded` | the run spent its `--max-credits` cap; nothing was sent | stop; tell the user what was spent (`details.spent` of `details.max`). Only the user raises the cap or runs `hgi budget reset` |
+| 13 `budget_exceeded` | the run spent its `--max-credits` cap; nothing more was sent (with `--ids`, keep the rows already printed) | stop; tell the user what was spent (`details.spent` of `details.max`). Only the user raises the cap or runs `hgi budget reset` |
 
 Errors are JSON on stderr when it is not a terminal: `{"schema":1,"error":{"code","exit_code","message","hint","details"}}`. Branch on `error.code`, not on the message.
 
