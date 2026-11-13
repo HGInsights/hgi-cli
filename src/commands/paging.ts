@@ -90,6 +90,8 @@ interface Tracker {
   reason?: string;
   /** Batch follow-ups: the original input, or one company as the caller gave it. */
   follow?: 'same' | { field: 'hg_ids' | 'domains'; text: string; kind: IdKind; norm: string };
+  /** The one company every page of this entry must be (when the input named one), else unchecked. */
+  expect?: { kind: IdKind; norm: string };
 }
 
 interface Accounting {
@@ -261,10 +263,16 @@ function planFollowUps(trackers: Array<Tracker | null>, input: Record<string, un
   const live = trackers.filter((t): t is Tracker => t !== null);
   const inputs = companyInputs(input);
   if (inputs.length < 2) {
+    const named = inputs[0];
     for (const t of live) {
       if (t.done) continue;
-      if (trackers.length === 1) t.follow = 'same';
-      else Object.assign(t, { done: true, reason: 'unmatched' });
+      // One entry, and it is the company the input named (when it named one): page with the input as given.
+      if (trackers.length === 1 && (named === undefined || matches(t.entry, named))) {
+        t.follow = 'same';
+        if (named) t.expect = { kind: named.kind, norm: named.norm };
+      } else {
+        Object.assign(t, { done: true, reason: 'unmatched' });
+      }
     }
     return;
   }
@@ -324,7 +332,8 @@ async function pageItems(p: Pager, ctx: PagingContext, first: unknown): Promise<
         }
         const list = page.value[itemsKey] as unknown[];
         const only = list.length === 1 && isRecord(list[0]) ? list[0] : null;
-        if (only === null || (follow !== 'same' && !matches(only, follow))) {
+        const want = follow === 'same' ? t.expect : follow;
+        if (only === null || (want !== undefined && !matches(only, want))) {
           Object.assign(t, { done: true, reason: 'unmatched' });
         } else {
           p.append(t, only);

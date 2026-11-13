@@ -342,6 +342,26 @@ describe('Story 3: a failure does not throw away what was paid for', () => {
   });
 });
 
+describe('a single company is never mixed with another', () => {
+  const entry = (id: string, offset: number) => ({ company_id: id, installs: [{ n: offset }, { n: offset + 1 }], total_installs_count: 9, has_more: true });
+
+  it('page 1 answers for another company: unmatched, not followed up', async () => {
+    server.handlers.set('company_widgets', () => textResult({ companies: [entry('other', 0)] }, 1));
+    const out = json(await call('company_widgets', { hg_ids: ['a1'] }, ['--all-pages']));
+    expect(server.toolCalls().length).toBe(1);
+    expect((out.companies as Array<Record<string, unknown>>)[0]).toMatchObject({ company_id: 'other', truncated: true, truncated_reason: 'unmatched' });
+  });
+
+  it('a follow-up answers for another company: its rows are not merged, the entry is unmatched', async () => {
+    server.handlers.set('company_widgets', (args) => textResult({ companies: [entry(args.offset ? 'other' : '0A1', Number(args.offset ?? 0))] }, 1));
+    const out = json(await call('company_widgets', { hg_ids: ['a1'] }, ['--all-pages']));
+    expect(server.toolCalls().length).toBe(2);
+    const company = (out.companies as Array<Record<string, unknown>>)[0];
+    expect(company).toMatchObject({ company_id: '0A1', pages_fetched: 1, truncated: true, truncated_reason: 'unmatched' });
+    expect(ns(company?.installs)).toEqual([0, 1]);
+  });
+});
+
 describe('Story 4: refused up front, nothing sent', () => {
   it.each([
     ['company_outlay', { hg_ids: ['a1'] }],

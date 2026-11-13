@@ -80,7 +80,7 @@ Anything else is refused before anything is sent (exit 2, `details.reason: "not_
 **Batch tools.** Page 1 is the call as given. Follow-ups go only for companies that are not finished, because `offset` applies to every company in a call:
 
 - with two or more values across `hg_ids` and `domains`, one call per company: the original input with `hg_ids`/`domains` replaced by that company's value as you wrote it (`{"hg_ids": ["<id>"], "offset": n}`), other filters kept. Entries are matched like `--ids` rows: `company_id`, else `requested_hg_id`, else `organization_id` for ids (lowercased, leading zeros removed), `company_domain` for domains (lowercased, no scheme, `www.` or path);
-- otherwise, when page 1 returned exactly one entry, the original input plus `offset`;
+- otherwise, when page 1 returned exactly one entry (the company the input named, if it named one), the original input plus `offset`; every follow-up must again return exactly that one company;
 - an entry that can't be tied to exactly one input, a page 1 with several entries and nothing to split on, or a follow-up that doesn't return exactly that one company, is not followed up and is marked `unmatched`. hgi never guesses which company a page belongs to.
 
 **The merged result.** Rows are appended to each page object's rows array. Its other fields (`has_more`, counts) are those of the last page fetched for it; for batch tools the top level is page 1's. Each page object gains:
