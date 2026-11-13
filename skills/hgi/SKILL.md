@@ -38,6 +38,7 @@ hgi call company_enrich --input '{"domain":"acme.com"}' # lookup, JSON on stdout
 hgi call search_companies --input '{"query":"saas"}' --select name,domain -f csv
 hgi call <tool> --input '{"limit":100}' --out result.json        # big result to a new file
 hgi call <tool> --ids @hg_ids.txt --input '{...}'        # a whole list: one JSONL row per line
+hgi call <tool> --all-pages --input '{...}'              # every page of an offset-paged tool, merged
 hgi run <tool> --input '{...}'                           # only after the user approves
 ```
 
@@ -50,6 +51,16 @@ hgi run <tool> --input '{...}'                           # only after the user a
 - A `{"warning":"ledger_not_updated",...}` line on stderr means the call still succeeded; do not re-run it.
 - For more than one company, use `--ids @file` (one HG id or domain per line; `--ids -` for stdin; `--ids-column <name>` for a CSV; `--batch-size <n>` to send fewer per call than the tool's limit) instead of looping. hgi batches by the tool's limit, sends batches one at a time, and prints `{"input", "result"}` or `{"input", "error"}` rows as JSONL in input order. Exit 3 means a batch failed (its rows carry the error, the rest are fine); any other non-zero exit stopped the run, and `details.rows_emitted` / `calls_made` say how far it got: keep the rows already printed and resume from there.
 
+### Paging (`--all-pages`)
+
+For every row of an offset-paged tool, use `hgi call <tool> --all-pages` instead of an `offset` loop. hgi pages only tools whose schemas show it is safe (an integer `offset` input and a rows array with `has_more` or a total); anything else is refused with exit 2 `not_pageable`, nothing sent. Don't pass `offset` yourself.
+
+- **Each extra page is a separate, billed call.** For batch tools (`hg_ids`/`domains`), follow-ups go one call per unfinished company.
+- It stops on `has_more: false`, an empty or short page, or the total reached, never on `has_more: true` alone (the server can say `true` after the last row). `--max-pages <n>` caps pages per page object (default 10, page 1 included).
+- The result keeps the server's shape. Each page object (the result, or each `companies[]` entry) gets `pages_fetched`; one cut short says `truncated: true` and `truncated_reason`: `max_pages`, `unmatched` (a batch entry hgi could not tie to one input, so it never guesses) or the code of the call that failed. Report truncated parts as incomplete.
+- One credit line at the end with the sum. `--meta` adds `pages_fetched` (calls sent) and `calls_without_cost`.
+- Not with `--ids` (exit 2 `all_pages_with_ids`): page one company list at a time.
+
 ## Recipes
 
 These recipes name tools as examples. Before each one:
@@ -59,7 +70,7 @@ These recipes name tools as examples. Before each one:
 - **Keep batches stable.** The server caches identical inputs for 30 days (7 for search), and a cached call costs nothing (observed). Sort ids and keep the same batches, so a re-run is free. Changing one id in a batch makes the whole batch a new input.
 - **Missing is not zero.** No installs, no intent, or a company left out of a batch response means unknown, not zero. Record it as unknown; don't score the account down.
 - **Show a plan first** for more than one batch (Rule 7).
-- Paging and batching are manual for now: a hand-written page loop and sorted id batches, as below.
+- Batching is manual for now: sorted id batches, as below. Paging is `--all-pages` where the tool allows it (`not_pageable` otherwise).
 
 ### Match an account list
 
@@ -82,24 +93,16 @@ hgi call company_firmographic --input '{"hg_ids":["<id1>","<id2>"]}' --select co
 **Batch:** read `maxItems` on `hg_ids` in `company_technographic`'s `input_schema`, and the maximum of `max_results` and `offset`. `company_intent` takes one company per call.
 **Order:**
 
-1. **Fit:** `company_technographic` on a sorted batch of `hg_ids`, filtered (`vendor_names`, `product_names` or `category_ids`) so pages stay small. Page with `offset`. Stop on a short page (fewer rows than `max_results`), once `total_installs_count` is reached, or at the schema's `offset` maximum. Don't stop on `has_more` alone: it can be wrong at page boundaries. At the `offset` maximum, report the result as partial and narrow the filter.
+1. **Fit:** `company_technographic` on a batch of `hg_ids`, filtered (`vendor_names`, `product_names` or `category_ids`) so pages stay small, with `--all-pages` (above). It pages each company on its own and stops on a short page or `total_installs_count`, not on `has_more` alone (it can be wrong at page boundaries). A company with `truncated: true` is partial: say so, and narrow the filter rather than raising `--max-pages`.
 2. **Topics:** resolve curated topic names to ids with `list_intent_topics`.
 3. **Intent:** `company_intent` on the company's web domain (`company_domain`), not only its HQ id: intent is observed on web domains. In one run, Accor had 0 topics on its HQ id and 18 on `accor.com` (observed; counts change over time). Check `company.id` and `company.name` in the response: a domain can resolve to a subsidiary.
 4. **Baseline:** large companies are active on about 70% of the ~20,000-topic catalogue (observed), so a raw topic count measures size, not interest. Compare the curated topics (`topic_ids`) with the company's own unfiltered summary. A summary with `topic_ids` counts only those topics. `fields:["summary"]` without a topic filter rejects `granularity` (422). When you request `fields:["topics"]`, pass `granularity:"global"`: the default is one row per state, which counts a topic several times.
 
 ```bash
-# technographics page loop (needs jq); page size and offset maximum come from the schema
-dir=$(mktemp -d)   # a fresh directory per run, so concurrent runs never share files
-schema=$(hgi tools list --json | jq '.tools[] | select(.name=="company_technographic") | .input_schema.properties')
-max=$(jq '.max_results.maximum' <<<"$schema"); maxoff=$(jq '.offset.maximum' <<<"$schema")
-ids='["<id1>","<id2>"]'; off=0   # one sorted batch of at most hg_ids.maxItems ids
-while [ "$ids" != "[]" ]; do
-  if [ "$off" -gt "$maxoff" ]; then echo "partial: offset maximum reached for $ids" >&2; break; fi
-  hgi call company_technographic --input "{\"hg_ids\":$ids,\"vendor_names\":[\"<vendor>\"],\"max_results\":$max,\"offset\":$off}" -f json > "$dir/tech-$off.json" || break
-  # next page only for companies that filled this page and are short of their stated total, sorted
-  ids=$(jq -c --argjson max "$max" --argjson off "$off" '[.companies[] | select(.installs_count == $max and $off + $max < .total_installs_count) | .company_id] | sort' "$dir/tech-$off.json")
-  off=$((off + max))
-done
+# every install per company, paged safely; max_results up to the schema's maximum keeps the call count down
+hgi call company_technographic --all-pages --max-pages 5 \
+  --input '{"hg_ids":["<id1>","<id2>"],"vendor_names":["<vendor>"],"max_results":<schema maximum>}' -f json > tech.json
+# exit 0 with truncated companies = capped; non-zero with details.partial_result = stopped early, tech.json still holds what was paid for
 hgi call company_intent --input '{"company_domain":"accor.com"}'
 hgi call company_intent --input '{"company_domain":"accor.com","fields":["summary"],"topic_ids":["<topic id>"]}'
 ```
@@ -113,7 +116,7 @@ hgi call company_intent --input '{"company_domain":"accor.com","fields":["summar
 1. Use the `hg_id`s from the matching recipe, sorted.
 2. To size one area, resolve its category ids first with `get_product_category`, as `company_spend`'s description says. Don't pass guessed `category_names`: a name that matches nothing returns 0 rows without an error.
 3. One `company_spend` call per batch of `hg_ids`, with `category_ids` set in that same call, not filtered afterwards.
-4. Page with `max_results` and `offset` only when `all_count` exceeds the rows returned, with the same stop rule as technographics.
+4. `company_spend` is not pageable with `--all-pages` (its per-company spend has no rows array). Page with `max_results` and `offset` by hand only when `all_count` exceeds the rows returned; stop on a short page or once `all_count` is reached, never on a has-more flag alone.
 5. Rows are per country, and categories form a tree through `category_parent_id` (Total IT → Total External IT → Software, …). Sum across countries, never a parent with its children.
 
 ```bash
@@ -161,6 +164,7 @@ Not null, but easy to misread:
 | 10 | wrong verb | use the verb the error names |
 | 11 | forbidden, or `tool_not_enabled_for_team` | the account, organization or team lacks access to this tool; stop and tell the user to ask an admin |
 | 12 | local credential or file problem | follow the hint. If `details.tool_ran` is `true`, the tool already ran and its result is on stdout: do not re-run it |
+| any, with `details.partial_result: true` | `--all-pages` stopped on a later page; the pages fetched so far are on stdout (or `--out`), unfinished parts marked `truncated` | keep them, they were billed; then act on the code as its own row says. Don't re-fetch pages you already have |
 | 13 `budget_exceeded` | the run spent its `--max-credits` cap; nothing more was sent (with `--ids`, keep the rows already printed) | stop; tell the user what was spent (`details.spent` of `details.max`). Only the user raises the cap or runs `hgi budget reset` |
 
 Errors are JSON on stderr when it is not a terminal: `{"schema":1,"error":{"code","exit_code","message","hint","details"}}`. Branch on `error.code`, not on the message.

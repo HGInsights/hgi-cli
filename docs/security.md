@@ -40,7 +40,7 @@
 
 - `hgi call` only runs tools the server marks `readOnlyHint: true`, decided against a fresh tool list on every invocation. `hgi run` runs everything else, including tools with no annotations. There is no `--yes` flag, so a host permission rule on `hgi call *` approves only lookups.
 - `--out <file>` never overwrites an existing file on `hgi call`, never follows symlinks, and refuses paths inside hgi's config and cache directories. `--input @file` and `--ids @file` refuse hgi's own credential and cache files (including through symlinks and hard links), and read only regular files. An allowlisted agent can still write a **new** file or send any other file it can read to HG Insights as tool input; scope your allowlist accordingly.
-- Credit cost is reported after each call (with `--ids`, once for the whole run) and recorded in the local [credit ledger](#the-credit-ledger), one line per call (with `--ids`, one per batch call). Credits are billed to your organization. `--ids` sends batches one at a time and stops at the first fatal error, so a run that hits a credit limit or an expired sign-in does not keep sending.
+- Credit cost is reported after each call (with `--ids` or `--all-pages`, once for the whole run, as the sum) and recorded in the local [credit ledger](#the-credit-ledger), one line per call (with `--ids`, one per batch call; with `--all-pages`, one per page). Credits are billed to your organization. `--ids` sends batches one at a time and `--all-pages` sends pages one at a time; both stop at the first fatal error, so a run that hits a credit limit or an expired sign-in does not keep sending. Each extra page of `--all-pages` is a separate, billed call, capped by `--max-pages` (default 10 per page object).
 
 ## The credit ledger
 
