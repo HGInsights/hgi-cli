@@ -5,6 +5,7 @@ import { registerBudgetCommands } from './commands/budget.js';
 import { registerInvokeCommands } from './commands/invoke.js';
 import { registerSkillCommands } from './commands/skill.js';
 import { registerToolsCommands } from './commands/tools.js';
+import { registerUsageCommands } from './commands/usage.js';
 import { HgiError, renderError, toHgiError } from './errors.js';
 import { closeHttp } from './http.js';
 
@@ -24,6 +25,7 @@ export function buildProgram(): Command {
   registerAuthCommands(program);
   registerToolsCommands(program);
   registerInvokeCommands(program);
+  registerUsageCommands(program);
   registerBudgetCommands(program);
   registerSkillCommands(program);
   return program;

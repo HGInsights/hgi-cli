@@ -68,6 +68,26 @@ With `--ids`, `hgi call` prints **one row per input line, in input order**, inst
 
 On a terminal or with `-f table|csv`, `tools list` prints `name`, `verb`, `required`, `description` (table descriptions are shortened to their first line) and the MCP version on stderr.
 
+## `hgi usage`
+
+`hgi usage [--since <when>] [--by tool|label|day|call]` reads the local credit ledger (no sign-in, no network) and keeps only rows for the current base URL's host, so staging and production never mix. The JSON value is a top-level array.
+
+- `--by tool` (default), `--by label`, `--by day`: one row per key, `{<key>, calls, credits, zero_cost_calls, unknown_cost_calls}`. `credits` sums the reported costs; `zero_cost_calls` counts calls that cost `0` (a server-side cache hit or a free tool); `unknown_cost_calls` counts calls whose cost the server did not report, which are not in `credits`. `tool` and `label` rows are sorted by `credits` descending, then key; `day` rows (`YYYY-MM-DD` in this machine's time zone) by date. Unlabeled calls have `label: null`.
+- `--by call`: the ledger rows themselves, oldest first, with the record keys below. `hgi usage --by call -f csv` is the raw ledger as CSV.
+- `--since`: `2026-11-01`, `2026-11-01T09:00` (local time unless a zone such as `Z` or `+02:00` is given), `today` (local midnight), or `24h` / `7d`. Without it, all history.
+
+Stdout carries only data, and credits stay numeric in every machine format. On stderr, every run prints `Local to this machine: calls made by hgi here, not your organization's bill.`, plus a note when nothing has been recorded yet or the ledger is disabled (`HGI_LEDGER=off`; the result is then `[]`), and a warning with the count of malformed lines skipped (a torn last line, hand edits). In `table` format only, a `0` in `credits` reads `0 (server cache or free tool)`, `label: null` reads `(none)`, and a footnote under the table explains `zero_cost_calls` and `unknown_cost_calls`.
+
+### The ledger record
+
+The ledger (`~/.config/hgi/ledger.jsonl`, see [security](security.md#the-credit-ledger)) is JSON Lines, one object per tool call that got a result back, keys in this order:
+
+```json
+{"v":1,"ts":"2026-11-04T17:03:12.481Z","host":"phoenix.hginsights.com","verb":"call","tool":"company_firmographic","label":"resolve","credit_cost":2,"budget_id":null,"mcp_version":"v2","status":"ok"}
+```
+
+`v` is the format version; `ts` is UTC with milliseconds; `host` is the server host (and port); `verb` is `call` or `run`; `label` is `--label` or `null`; `credit_cost` is the server's `_meta.creditCost`, `null` when not reported (never `0`); `budget_id` is `HGI_BUDGET_ID` or `null`; `mcp_version` may be `null`; `status` is `ok` or `tool_error` (an `isError` result, including `credit_limit_exceeded`). This is a versioned interface: version 1 may gain new keys, and existing keys keep their meaning. Readers should ignore keys they do not know.
+
 ## Safety notes
 
 - **CSV and spreadsheets.** Cells are written as the data is. A value that starts with `=`, `+`, `-` or `@` (third-party text can) is read as a formula by Excel and Google Sheets. Open untrusted exports as text, or prefix such cells yourself.

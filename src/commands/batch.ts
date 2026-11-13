@@ -33,6 +33,8 @@ export interface BatchOptions {
   validate: boolean;
   /** The run cap (`--max-credits`): checked before every batch call, and each call's cost recorded after it. */
   budget?: { id: string; max: number };
+  /** Called with every result that came back (the credit ledger). Never throws. */
+  onResult?: (result: CallToolResult) => Promise<void>;
 }
 
 interface RowError {
@@ -161,14 +163,16 @@ async function callBatch(
   input: Record<string, unknown>,
   batch: Batch,
   key: string,
-  budget: BatchOptions['budget'],
+  opts: Pick<BatchOptions, 'budget' | 'onResult'>,
 ): Promise<HgiError | null> {
+  const { budget } = opts;
   run.callsMade += 1;
   let result: CallToolResult | undefined;
   let budgetFailure: HgiError | null = null;
   try {
     result = await session.callTool(tool.name, argsFor(input, batch));
     run.addCost(result);
+    await opts.onResult?.(result);
     if (budget) {
       try {
         await recordSpend(budget.id, budget.max, creditCostOf(result));
@@ -277,7 +281,7 @@ export async function runBatch(session: McpSession, tool: McpTool, input: Record
     for (const [i, batch] of plan.batches.entries()) {
       if (opts.budget && i > 0) await checkBatchBudget(opts.budget, run);
       if (process.stderr.isTTY) process.stderr.write(`hgi: batch ${i + 1}/${plan.batches.length}\n`);
-      const budgetFailure = await callBatch(run, session, tool, input, batch, key, opts.budget);
+      const budgetFailure = await callBatch(run, session, tool, input, batch, key, opts);
       await run.flush(opts.select);
       if (budgetFailure) {
         throw new HgiError('local_state_error', `The batch call ran, but ${budgetFailure.message.replace(/^Could not/, 'hgi could not')}`, {

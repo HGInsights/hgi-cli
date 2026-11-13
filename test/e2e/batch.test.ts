@@ -534,3 +534,21 @@ describe('the run cap (--max-credits) with --ids', () => {
     });
   });
 });
+
+describe('the credit ledger with --ids', () => {
+  it('records one ledger row per batch call, with the label and each call’s cost', async () => {
+    setTool(batchTool(), (a, n) => (n === 2 ? { ...echo(a, 3), isError: true } : echo(a, 2)));
+    const res = await call(['--ids', `@${idsFile(ids(60))}`, '--label', 'enrich']);
+    expect(res.code, res.stderr).toBe(3);
+    const ledger = fs
+      .readFileSync(path.join(sb.configDir, 'ledger.jsonl'), 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(ledger.map((r) => [r.tool, r.verb, r.label, r.credit_cost, r.status])).toEqual([
+      [BATCH, 'call', 'enrich', 2, 'ok'],
+      [BATCH, 'call', 'enrich', 3, 'tool_error'],
+      [BATCH, 'call', 'enrich', 2, 'ok'],
+    ]);
+  });
+});

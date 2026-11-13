@@ -1,9 +1,11 @@
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Option, type Command } from 'commander';
 import { protectedDirs } from '../config.js';
 import { HgiError, toHgiError } from '../errors.js';
 import { readInputFile } from '../output/out-file.js';
 import { mcpCacheKey } from './tools.js';
 import { toolsCachePath, writeToolsCache } from '../mcp/cache.js';
+import { budgetId as ledgerBudgetId, ledgerPath, parseLabel, recordCall } from '../ledger.js';
 import { checkBudget, recordSpend, resolveBudgetId, resolveMaxCredits } from '../budget.js';
 import { creditCostOf, interpretResult } from '../mcp/result.js';
 import { openSession } from '../mcp/session.js';
@@ -22,6 +24,7 @@ interface InvokeOptions {
   out?: string;
   force?: boolean;
   meta?: boolean;
+  label?: string;
   validate: boolean;
   timeout: string;
   maxCredits?: string;
@@ -102,6 +105,8 @@ async function runInvoke(verb: Verb, toolName: string, opts: InvokeOptions, cmd:
   const input = await readInput(opts.input);
   preflightOutput({ format: opts.format, select: opts.select, out: opts.out, force: opts.force, allowForce: verb === 'run' });
   const timeoutMs = parseTimeoutMs(opts.timeout);
+  const label = parseLabel(opts.label);
+  const ledger = ledgerPath();
   const ids = opts.ids === undefined ? undefined : await readIds({ ...opts, ids: opts.ids }, input);
   // The run cap applies to `hgi call` only. It is checked before credentials are read or anything is sent.
   const maxCredits = verb === 'call' ? resolveMaxCredits(opts.maxCredits) : null;
@@ -110,6 +115,21 @@ async function runInvoke(verb: Verb, toolName: string, opts: InvokeOptions, cmd:
   const ctx = buildContext(cmd);
   const creds = ctx.tokens.loadCredentials();
   const session = await openSession(ctx, { timeoutMs });
+  // Recorded before interpreting (which throws on isError) and before any output, so an isError
+  // result, a failed --out or a broken stdout still leaves the row. Never fails the call.
+  const recordUsage = (result: CallToolResult): Promise<void> =>
+    recordCall(ledger, {
+      v: 1,
+      ts: new Date().toISOString(),
+      host: new URL(ctx.base).host,
+      verb,
+      tool: toolName,
+      label,
+      credit_cost: creditCostOf(result),
+      budget_id: ledgerBudgetId(),
+      mcp_version: session.state.mcpVersion,
+      status: result.isError ? 'tool_error' : 'ok',
+    });
   try {
     const tools = await session.listTools();
     writeToolsCache(toolsCachePath(...mcpCacheKey(ctx.base, creds)), {
@@ -136,12 +156,14 @@ async function runInvoke(verb: Verb, toolName: string, opts: InvokeOptions, cmd:
         meta: opts.meta,
         validate: opts.validate,
         budget: budgetId !== null && maxCredits !== null ? { id: budgetId, max: maxCredits } : undefined,
+        onResult: recordUsage,
       });
       return;
     }
     if (opts.validate) assertValidInput(tool, input);
 
     const result = await session.callTool(toolName, input);
+    await recordUsage(result);
     let budgetFailure: HgiError | null = null;
     if (budgetId !== null && maxCredits !== null) {
       try {
@@ -208,6 +230,7 @@ export function registerInvokeCommands(program: Command): void {
       .option('--out <file>', 'write the result to a new file instead of stdout')
       .option('--force', verb === 'run' ? 'overwrite an existing --out file' : 'not available on call')
       .option('--meta', 'print {result, credit_cost, mcp_version} instead of the bare result')
+      .option('--label <label>', 'tag this call in the local credit ledger (see `hgi usage --by label`)')
       .option('--timeout <seconds>', 'per-request timeout', '120')
       .addOption(new Option('--no-validate', 'skip client-side schema validation (let the server judge the input)').hideHelp());
     if (verb === 'call') {
