@@ -270,8 +270,16 @@ describe('--retries / --retry-budget (issue #32)', () => {
       details: { outcome_unknown: false },
     });
     const d = harness([json(502, {}), ok()], 0, { retries: 0 });
-    await expect(d.fetchFn('http://x', post('tools/list'))).rejects.toMatchObject({ code: 'server_unreachable' });
+    await expect(d.fetchFn('http://x', post('tools/list'))).rejects.toMatchObject({ code: 'server_unreachable', details: { attempts: 1 } });
     expect(d.calls).toHaveLength(1);
+    const e = harness([refused(), ok()], 0, { retries: 0 });
+    await expect(e.fetchFn('http://x', post('initialize'))).rejects.toMatchObject({ code: 'server_unreachable', details: { attempts: 1 } });
+  });
+  it('an exhausted not-established retry on a non-call request carries attempts (built-in limit 2)', async () => {
+    const h = harness([json(502, {}), json(502, {}), json(502, {})]);
+    await expect(h.fetchFn('http://x', post('tools/list'))).rejects.toMatchObject({ details: { status: 502, attempts: 3 } });
+    const n = harness([unreachable('ECONNRESET'), unreachable('ECONNRESET'), unreachable('ECONNRESET')]);
+    await expect(n.fetchFn('http://x', post('tools/list'))).rejects.toMatchObject({ details: { attempts: 3 } });
   });
   it('never retries after a tools/call was sent, whatever --retries says', async () => {
     for (const step of [unreachable('ECONNRESET'), json(500, {}), json(502, {}), json(503, { error: 'x' })]) {

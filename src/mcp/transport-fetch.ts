@@ -148,10 +148,8 @@ export function createTransportFetch(
             cause: err.cause,
           });
         }
-        if (transientAttempts > 0) {
-          throw new HgiError(err.code, err.message, { hint: err.hint, details: { ...err.details, ...attempts }, cause: err.cause });
-        }
-        throw err;
+        // Every network failure of a non-call request is a not_established retry class: its retries ran out.
+        throw new HgiError(err.code, err.message, { hint: err.hint, details: { ...err.details, attempts: sends }, cause: err.cause });
       }
 
       const headerVersion = res.headers.get('x-mcp-version');
@@ -211,7 +209,7 @@ export function createTransportFetch(
         }
         throw new HgiError('server_unreachable', `The server returned HTTP ${res.status}.`, {
           hint: 'Retry in a moment.',
-          details: { status: res.status, ...(transientAttempts > 0 ? { attempts: sends } : {}) },
+          details: { status: res.status, ...([502, 503, 504].includes(res.status) ? { attempts: sends } : {}) },
         });
       }
 
