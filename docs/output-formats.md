@@ -39,10 +39,26 @@ Results are never truncated. A large result prints complete in every format. Use
 `--meta` replaces the bare result on stdout with an envelope:
 
 ```json
-{"result": {...}, "credit_cost": 2, "mcp_version": "v2"}
+{"result": {...}, "credit_cost": 2, "mcp_version": "v2", "attempts": 1}
 ```
 
-`--select` trims the `result` inside the envelope, so `--meta --select name` gives `{"result": {"name": ...}, "credit_cost": ..., "mcp_version": ...}`.
+`attempts` is how many times the `tools/call` was sent: 1, plus every [retry](exit-codes.md#retries) of it. `--select` trims the `result` inside the envelope, so `--meta --select name` gives `{"result": {"name": ...}, "credit_cost": ..., "mcp_version": ..., "attempts": ...}`.
+
+## Retry lines
+
+Every retry writes one line on stderr before its wait, with or without `--retries`. On a terminal:
+
+```
+hgi: retry 2/6: rate_limited, waiting 12s
+```
+
+Otherwise (stderr not a terminal, or `--json-errors`), the same as one JSON object:
+
+```json
+{"retry":{"attempt":2,"max":6,"code":"rate_limited","wait_seconds":12}}
+```
+
+`code` is `rate_limited`, `load_shed`, `not_established` or `governance_unavailable`. `max` is that class's limit (`--retries`, else the built-in 3 or 2). `wait_seconds` is the wait that follows, a number rounded to one decimal place. The lines go to stderr only, so stdout stays the result.
 
 ## `hgi call --ids` (batches)
 
@@ -58,7 +74,7 @@ With `--ids`, `hgi call` prints **one row per input line, in input order**, inst
 - `error.code` is `not_found` (the server left the input out), `unexpected_response` (the response has no array to match against), or the code of the failed batch call (for example `tool_error`). Error messages are redacted like every other `hgi` error.
 - **The default format is JSONL, on a terminal or not.** JSONL rows stream as each batch returns. `-f json` prints one array of rows; `-f csv|yaml|table` format the list of rows. Those, and `--out`, are written once when the run ends (or, on a fatal stop, with the rows so far).
 - `--select` trims each row's `result`; `input` and `error` are always kept.
-- **`--meta` does not wrap stdout** with `--ids`. stdout stays pure rows, and `--meta` adds one summary object on stderr at the end: `{"calls", "rows", "row_errors", "credit_cost", "calls_without_cost"}`. `credit_cost` sums the costs the calls reported; `calls_without_cost` counts calls that reported none, so the sum is a lower bound.
+- **`--meta` does not wrap stdout** with `--ids`. stdout stays pure rows, and `--meta` adds one summary object on stderr at the end: `{"calls", "retries", "rows", "row_errors", "credit_cost", "calls_without_cost"}`. `calls` counts batch calls, one per batch however many times it was sent; `retries` is the total of re-sends across them. `credit_cost` sums the costs the calls reported (for a re-sent batch, its last attempt's); `calls_without_cost` counts calls that reported none, so the sum is a lower bound.
 - The credit line on stderr is printed once, with the total, at the end (and before a fatal error).
 - On a terminal, progress (`hgi: batch 3/40`) goes to stderr. It is never printed when stderr is not a terminal.
 
