@@ -13,7 +13,7 @@ export function reportCredit(cost: number | null): void {
   process.stderr.write(stderrWantsJson() ? `${JSON.stringify({ credit_cost: cost })}\n` : `credit_cost: ${cost ?? 'unknown'}\n`);
 }
 
-export type RetryCode = 'rate_limited' | 'load_shed' | 'not_established' | 'governance_unavailable';
+type RetryCode = 'rate_limited' | 'load_shed' | 'not_established' | 'governance_unavailable';
 
 export interface RetryEvent {
   attempt: number;
