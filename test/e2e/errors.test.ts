@@ -612,7 +612,7 @@ describe('issue #32: --retries and --retry-budget', () => {
       expect(server.requests).toEqual([]);
     });
     it('a bad value is never echoed (a token pasted into the wrong place stays off the terminal)', async () => {
-      const secret = 'at_0123456789abcdef0123456789abcdef';
+      const secret = 'at_0123456789abcdef0123456789abcdef'; // gitleaks:allow
       for (const [args, env] of [
         [['--retries', secret], sb.env],
         [['--retry-budget', secret], sb.env],

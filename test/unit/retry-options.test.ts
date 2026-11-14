@@ -51,7 +51,7 @@ describe('resolveRetryOptions', () => {
     });
   }
   it('never echoes the bad value (a token pasted into the wrong place)', () => {
-    const secret = 'at_0123456789abcdef0123456789abcdef';
+    const secret = 'at_0123456789abcdef0123456789abcdef'; // gitleaks:allow
     for (const fn of [
       () => resolveRetryOptions({ retries: secret }, {}),
       () => resolveRetryOptions({}, { HGI_RETRIES: secret }),
