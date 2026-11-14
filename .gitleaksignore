@@ -6,3 +6,7 @@
 42e1f8aff4642ceeac41a1ecb7b21f2fa2037885:test/unit/validate-result.test.ts:generic-api-key:118
 b28322ee921a47d2f3124b97e316ec1cb0f9b07c:test/unit/validate-result.test.ts:generic-api-key:118
 fa13b37cd45082b9054a63227a6d90f8eb451047:test/unit/redact-errors.test.ts:generic-api-key:13
+# Fake token fixtures for the "a bad --retries / --retry-budget value is never echoed" tests (issue #32), added
+# in 2819272 before their inline `gitleaks:allow` markers.
+281927249cbf707c71dc2eef8b99a6a33f54db2a:test/unit/retry-options.test.ts:generic-api-key:54
+281927249cbf707c71dc2eef8b99a6a33f54db2a:test/e2e/errors.test.ts:generic-api-key:615
