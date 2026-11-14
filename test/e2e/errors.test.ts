@@ -398,3 +398,231 @@ describe('package metadata', () => {
     expect(pkg.bin.hgi).toBe('dist/bin.js');
   });
 });
+
+describe('issue #32: --retries and --retry-budget', () => {
+  type RetryLine = { attempt: number; max: number; code: string; wait_seconds: number };
+  const retryLines = (res: CliResult): RetryLine[] =>
+    res.stderr
+      .split('\n')
+      .filter((l) => l.startsWith('{"retry":'))
+      .map((l) => (JSON.parse(l) as { retry: RetryLine }).retry);
+  const shed = (times: number) =>
+    server.faults.push({
+      match: { rpcMethod: 'tools/call' },
+      status: 503,
+      headers: { 'retry-after': '0' },
+      body: { jsonrpc: '2.0', error: { code: -32000, message: 'Server busy' }, id: null },
+      times,
+    });
+  const limited = (times: number, retryAfter = '0') =>
+    server.faults.push({ match: { rpcMethod: 'tools/call' }, status: 429, headers: { 'retry-after': retryAfter }, body: {}, times });
+  const refusal = (errorCode?: string) => ({
+    isError: true,
+    content: [{ type: 'text' as const, text: 'Refused by the server.' }],
+    ...(errorCode ? { _meta: { errorCode } } : {}),
+  });
+  /** The tool answers governance_unavailable `fails` times, then its normal result. */
+  const governanceThen = (tool: string, fails: number, ok = textResult({ name: 'Acme' }, 2)) => {
+    let n = 0;
+    server.handlers.set(tool, () => (n++ < fails ? refusal('governance_unavailable') : ok));
+  };
+  const runAgent = (args: string[] = [], env = sb.env) => runCli(['run', 'start_agent', '--input', '{"agent":"a"}', ...args], env);
+
+  describe('Story 1: ride out rate limits and restarts', () => {
+    beforeEach(() => login(sb));
+    it('call and run with --retries 6 ride out five load-shed 503s', async () => {
+      shed(5);
+      const call = await lookup(undefined, ['--retries', '6']);
+      expect(call.code, call.stderr).toBe(0);
+      expect(server.toolCalls()).toHaveLength(6);
+      expect(retryLines(call).map((l) => `${l.code} ${l.attempt}/${l.max}`)).toEqual([1, 2, 3, 4, 5].map((n) => `load_shed ${n}/6`));
+      server.requests = [];
+      shed(5);
+      const run = await runAgent(['--retries', '6']);
+      expect(run.code, run.stderr).toBe(0);
+      expect(server.toolCalls()).toHaveLength(6);
+    });
+    it('HGI_RETRIES=6 behaves like --retries 6, and --retries 1 wins over it', async () => {
+      shed(5);
+      const viaEnv = await runCli(['call', 'company_lookup', '--input', '{"domain":"acme.com"}'], { ...sb.env, HGI_RETRIES: '6' });
+      expect(viaEnv.code, viaEnv.stderr).toBe(0);
+      expect(server.toolCalls()).toHaveLength(6);
+      server.requests = [];
+      limited(5);
+      const res = await runCli(['call', 'company_lookup', '--input', '{"domain":"acme.com"}', '--retries', '1'], { ...sb.env, HGI_RETRIES: '6' });
+      const err = expectError(res, 5, 'rate_limited');
+      expect(err.details?.attempts).toBe(2);
+      expect(server.toolCalls()).toHaveLength(2);
+    });
+    it('HGI_RETRY_BUDGET is used, and --retry-budget wins over it', async () => {
+      limited(5, '3');
+      const env = { ...sb.env, HGI_RETRY_BUDGET: '2' };
+      const err = expectError(await runCli(['call', 'company_lookup', '--input', '{"domain":"acme.com"}', '--retries', '3'], env), 5, 'rate_limited');
+      expect(err.details).toMatchObject({ retry_after_seconds: 3, attempts: 1 });
+      server.faults = [];
+      server.requests = [];
+      limited(1, '3');
+      const ok = await runCli(['call', 'company_lookup', '--input', '{"domain":"acme.com"}', '--retries', '3', '--retry-budget', '5'], env);
+      expect(ok.code, ok.stderr).toBe(0);
+      expect(server.toolCalls()).toHaveLength(2);
+    });
+    it('the retry waits may outlast --timeout: it bounds each attempt, not the waits between them', async () => {
+      limited(2, '1');
+      const res = await lookup(undefined, ['--retries', '3', '--timeout', '0.5']);
+      expect(res.code, res.stderr).toBe(0);
+      expect(server.toolCalls()).toHaveLength(3);
+    });
+    it('--retries 0 turns the built-in retries off on both verbs', async () => {
+      limited(5);
+      const call = expectError(await lookup(undefined, ['--retries', '0']), 5, 'rate_limited');
+      expect(call.details?.attempts).toBe(1);
+      expect(server.toolCalls()).toHaveLength(1);
+      server.requests = [];
+      const run = expectError(await runAgent(['--retries', '0']), 5, 'rate_limited');
+      expect(run.details?.attempts).toBe(1);
+      expect(server.toolCalls()).toHaveLength(1);
+    });
+  });
+
+  describe('Story 2: every retry prints one line', () => {
+    beforeEach(() => login(sb));
+    it('a plain call that hits one 429 prints one retry line with max 3, then the result and the credit line', async () => {
+      limited(1);
+      const res = await lookup();
+      expect(res.code, res.stderr).toBe(0);
+      expect(JSON.parse(res.stdout)).toMatchObject({ name: 'Acme' });
+      const lines = res.stderr.split('\n').filter(Boolean);
+      expect(lines).toHaveLength(2);
+      const retry = (JSON.parse(lines[0] as string) as { retry: RetryLine }).retry;
+      expect(retry).toMatchObject({ attempt: 1, max: 3, code: 'rate_limited' });
+      expect(typeof retry.wait_seconds).toBe('number');
+      expect(JSON.parse(lines[1] as string)).toEqual({ credit_cost: 2 });
+    });
+  });
+
+  describe('Story 3: governance_unavailable on hgi call', () => {
+    beforeEach(() => login(sb));
+    it('--retries 3: two refusals then a result exit 0, with two retry lines within [0, 2] and [0, 4] s', async () => {
+      governanceThen('company_lookup', 2);
+      const started = Date.now();
+      const res = await lookup(undefined, ['--retries', '3']);
+      expect(res.code, res.stderr).toBe(0);
+      expect(JSON.parse(res.stdout)).toEqual({ name: 'Acme' });
+      expect(server.toolCalls()).toHaveLength(3);
+      const lines = retryLines(res);
+      expect(lines.map((l) => `${l.code} ${l.attempt}/${l.max}`)).toEqual(['governance_unavailable 1/3', 'governance_unavailable 2/3']);
+      expect(lines[0]?.wait_seconds).toBeGreaterThanOrEqual(0);
+      expect(lines[0]?.wait_seconds).toBeLessThanOrEqual(2);
+      expect(lines[1]?.wait_seconds).toBeLessThanOrEqual(4);
+      expect(Date.now() - started).toBeLessThan(20_000);
+    });
+    it('without --retries, and with --retries 0, it is not retried', async () => {
+      governanceThen('company_lookup', 5);
+      expectError(await lookup(), 7, 'governance_unavailable');
+      expect(server.toolCalls()).toHaveLength(1);
+      server.requests = [];
+      const err = expectError(await lookup(undefined, ['--retries', '0']), 7, 'governance_unavailable');
+      expect(err.details).toMatchObject({ retryable: true, outcome_unknown: false });
+      expect(server.toolCalls()).toHaveLength(1);
+    });
+  });
+
+  describe('Story 4: a call that may have run is never repeated', () => {
+    beforeEach(() => login(sb));
+    it('hgi run --retries 6 sends governance_unavailable once and exits 7, retryable', async () => {
+      governanceThen('start_agent', 5);
+      const err = expectError(await runAgent(['--retries', '6']), 7, 'governance_unavailable');
+      expect(err.details).toMatchObject({ retryable: true, outcome_unknown: false });
+      expect(err.details?.attempts).toBeUndefined();
+      expect(server.toolCalls()).toHaveLength(1);
+    });
+    it('a 500 or a dropped connection after the tools/call was sent is not retried, on both verbs', async () => {
+      for (const fault of [{ status: 500, body: { error: 'boom' } }, { status: 0, destroy: true }]) {
+        for (const verb of ['call', 'run']) {
+          server.requests = [];
+          server.faults = [{ match: { rpcMethod: 'tools/call' }, times: 5, ...fault }];
+          const res = verb === 'call' ? await lookup(undefined, ['--retries', '6']) : await runAgent(['--retries', '6']);
+          const err = expectError(res, 7, 'server_unreachable');
+          expect(err.details?.outcome_unknown).toBe(true);
+          expect(server.toolCalls()).toHaveLength(1);
+          expect(retryLines(res)).toEqual([]);
+        }
+      }
+    });
+    it('tool_error, credit_limit_exceeded, tool_not_enabled_for_team and phoenix_account_required are each sent once', async () => {
+      for (const [code, exit, errorCode] of [
+        [undefined, 3, 'tool_error'],
+        ['credit_limit_exceeded', 6, 'credit_limit_exceeded'],
+        ['tool_not_enabled_for_team', 11, 'tool_not_enabled_for_team'],
+        ['phoenix_account_required', 4, 'phoenix_account_required'],
+      ] as const) {
+        server.requests = [];
+        server.handlers.set('company_lookup', () => refusal(code));
+        expectError(await lookup(undefined, ['--retries', '6']), exit, errorCode);
+        expect(server.toolCalls()).toHaveLength(1);
+      }
+    });
+  });
+
+  describe('Story 5: retries run out, or the options are wrong', () => {
+    it('governance_unavailable that never clears: N + 1 sends, exit 7, details.attempts N + 1', async () => {
+      await login(sb);
+      governanceThen('company_lookup', 99);
+      const res = await lookup(undefined, ['--retries', '2']);
+      const err = expectError(res, 7, 'governance_unavailable');
+      expect(err.details).toMatchObject({ retryable: true, outcome_unknown: false, attempts: 3 });
+      expect(server.toolCalls()).toHaveLength(3);
+      expect(retryLines(res)).toHaveLength(2);
+    });
+    it('a load-shed that never clears keeps server_unreachable with outcome_unknown false and attempts', async () => {
+      await login(sb);
+      shed(99);
+      const err = expectError(await lookup(undefined, ['--retries', '2']), 7, 'server_unreachable');
+      expect(err.details).toMatchObject({ outcome_unknown: false, attempts: 3 });
+    });
+    it('--meta reports attempts: 2 after one 429 with --retries 3, and 1 without retries', async () => {
+      await login(sb);
+      limited(1);
+      const meta = JSON.parse((await lookup(undefined, ['--meta', '--retries', '3'])).stdout) as Record<string, unknown>;
+      expect(meta).toMatchObject({ result: { name: 'Acme' }, credit_cost: 2, mcp_version: 'v2', attempts: 2 });
+      expect(JSON.parse((await lookup(undefined, ['--meta'])).stdout)).toMatchObject({ attempts: 1 });
+    });
+    const bad: Array<[string, string, string]> = [
+      ['--retries', '-1', 'bad_retries'],
+      ['--retries', '21', 'bad_retries'],
+      ['--retries', '2.5', 'bad_retries'],
+      ['--retries', 'x', 'bad_retries'],
+      ['--retry-budget', '0', 'bad_retry_budget'],
+      ['--retry-budget', '3601', 'bad_retry_budget'],
+      ['--retry-budget', 'x', 'bad_retry_budget'],
+    ];
+    it('bad values refuse with exit 2 before anything is sent, through the flags and the env vars', async () => {
+      await login(sb);
+      server.requests = [];
+      for (const [flag, value, reason] of bad) {
+        for (const verb of ['call', 'run']) {
+          const tool = verb === 'call' ? ['company_lookup', '--input', '{"domain":"acme.com"}'] : ['start_agent', '--input', '{"agent":"a"}'];
+          const viaFlag = expectError(await runCli([verb, ...tool, `${flag}=${value}`], sb.env), 2, 'invalid_input');
+          expect(viaFlag.details?.reason).toBe(reason);
+          const envName = flag === '--retries' ? 'HGI_RETRIES' : 'HGI_RETRY_BUDGET';
+          const viaEnv = expectError(await runCli([verb, ...tool], { ...sb.env, [envName]: value }), 2, 'invalid_input');
+          expect(viaEnv.details?.reason).toBe(reason);
+        }
+      }
+      expect(server.requests).toEqual([]);
+    });
+    it('a bad value is never echoed (a token pasted into the wrong place stays off the terminal)', async () => {
+      const secret = 'at_0123456789abcdef0123456789abcdef';
+      for (const [args, env] of [
+        [['--retries', secret], sb.env],
+        [['--retry-budget', secret], sb.env],
+        [[], { ...sb.env, HGI_RETRIES: secret }],
+        [[], { ...sb.env, HGI_RETRY_BUDGET: secret }],
+      ] as const) {
+        const res = await runCli(['call', 'company_lookup', '--input', '{"domain":"acme.com"}', ...args], env);
+        expect(res.code).toBe(2);
+        expect(res.stdout + res.stderr).not.toContain(secret);
+      }
+    });
+  });
+});

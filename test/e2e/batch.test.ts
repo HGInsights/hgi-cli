@@ -465,7 +465,7 @@ describe('Story 6: know what the run cost', () => {
     expect(rows(res)).toHaveLength(51);
     expect(rows(res).every((r) => typeof r.input === 'string')).toBe(true);
     const summary = stderrJsonLines(res).find((l) => 'calls' in l);
-    expect(summary).toEqual({ calls: 3, rows: 51, row_errors: 25, credit_cost: 4, calls_without_cost: 1 });
+    expect(summary).toEqual({ calls: 3, retries: 0, rows: 51, row_errors: 25, credit_cost: 4, calls_without_cost: 1 });
   });
 
   it('with stderr not a terminal, there are no progress lines', async () => {
@@ -550,5 +550,43 @@ describe('the credit ledger with --ids', () => {
       [BATCH, 'call', 'enrich', 3, 'tool_error'],
       [BATCH, 'call', 'enrich', 2, 'ok'],
     ]);
+  });
+});
+
+describe('issue #32: --retries with --ids', () => {
+  const governance = (): ToolResult => ({
+    isError: true,
+    content: [{ type: 'text', text: 'Budget service down.' }],
+    _meta: { errorCode: 'governance_unavailable' },
+  });
+
+  it('a batch call that gets governance_unavailable once is re-sent; the run finishes with every row', async () => {
+    setTool(batchTool(), (a, n) => (n === 2 ? governance() : echo(a, 2)));
+    const res = await call(['--ids', `@${idsFile(ids(60))}`, '--retries', '2', '--meta']);
+    expect(res.code, res.stderr).toBe(0);
+    expect(rows(res)).toHaveLength(60);
+    expect(rows(res).every((r) => r.result)).toBe(true);
+    expect(server.toolCalls()).toHaveLength(4);
+    const lines = stderrJsonLines(res);
+    expect(lines.filter((l) => 'retry' in l)).toHaveLength(1);
+    expect(lines.find((l) => 'calls' in l)).toMatchObject({ calls: 3, retries: 1, credit_cost: 6 });
+  });
+
+  it('a batch call whose governance retries run out stops the run with attempts and its progress', async () => {
+    setTool(batchTool(), (a, n) => (n >= 2 ? governance() : echo(a, 2)));
+    const res = await call(['--ids', `@${idsFile(ids(60))}`, '--retries', '1']);
+    expect(res.code, res.stderr).toBe(7);
+    const { error } = errorBody(res);
+    expect(error.code).toBe('governance_unavailable');
+    expect(error.details).toMatchObject({ retryable: true, attempts: 2, rows_emitted: 25, calls_made: 2 });
+    expect(server.toolCalls()).toHaveLength(3);
+    expect(rows(res)).toHaveLength(25);
+  });
+
+  it('without --retries a batch call is not re-sent on governance_unavailable', async () => {
+    setTool(batchTool(), (a, n) => (n === 1 ? governance() : echo(a, 2)));
+    const res = await call(['--ids', `@${idsFile(ids(30))}`]);
+    expect(res.code, res.stderr).toBe(7);
+    expect(server.toolCalls()).toHaveLength(1);
   });
 });
