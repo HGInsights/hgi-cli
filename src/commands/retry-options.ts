@@ -4,8 +4,6 @@ type Env = NodeJS.ProcessEnv;
 
 export const MAX_RETRIES = 20;
 export const MAX_RETRY_BUDGET_SECONDS = 3600;
-/** The per-request retry budget when `--retries` is set and `--retry-budget` is not. */
-export const RETRIES_DEFAULT_BUDGET_MS = 600_000;
 
 /**
  * What `--retries` / `--retry-budget` (or their env vars) resolved to. `null` means "not given": without either,
