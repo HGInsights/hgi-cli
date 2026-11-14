@@ -5,7 +5,7 @@ import type { McpSession } from '../mcp/session.js';
 import { roundWait, type RetryEvent } from './io.js';
 
 /** The longest single `governance_unavailable` wait, in seconds (full jitter in `[0, min(2^attempt, 30)]`). */
-export const GOVERNANCE_MAX_WAIT_SECONDS = 30;
+const GOVERNANCE_MAX_WAIT_SECONDS = 30;
 
 export interface SendOptions {
   /**
@@ -34,7 +34,7 @@ export interface SendOutcome {
   budgetFailure: HgiError | null;
 }
 
-export function isGovernanceUnavailable(result: CallToolResult): boolean {
+function isGovernanceUnavailable(result: CallToolResult): boolean {
   return result.isError === true && (result._meta as { errorCode?: unknown } | undefined)?.errorCode === 'governance_unavailable';
 }
 

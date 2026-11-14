@@ -224,6 +224,14 @@ describe('--retries / --retry-budget (issue #32)', () => {
     });
     expect(h.events.map((e) => `${e.code}:${e.attempt}/${e.max}`)).toEqual(['rate_limited:1/3', 'load_shed:2/3', 'rate_limited:3/3']);
   });
+  it('without --retries, a load-shed retry moves a later header-less 429 to the next backoff step, as before', async () => {
+    const h = harness([shed(), json(429, {}), ok()]);
+    expect((await h.fetchFn('http://x', post('tools/call'))).status).toBe(200);
+    expect(h.waits).toEqual([1000, 4000]);
+    const own = harness([shed(), json(429, {}), ok()], 0, { retries: 3 });
+    await own.fetchFn('http://x', post('tools/call'));
+    expect(own.waits).toEqual([1000, 2000]);
+  });
   it('--retry-budget 120: a Retry-After longer than what is left ends the retries at once', async () => {
     const h = harness([json(429, {}, { 'retry-after': '100' }), json(429, {}, { 'retry-after': '30' })], 0, {
       retries: 6,

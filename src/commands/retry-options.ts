@@ -2,8 +2,8 @@ import { HgiError } from '../errors.js';
 
 type Env = NodeJS.ProcessEnv;
 
-export const MAX_RETRIES = 20;
-export const MAX_RETRY_BUDGET_SECONDS = 3600;
+const MAX_RETRIES = 20;
+const MAX_RETRY_BUDGET_SECONDS = 3600;
 
 /**
  * What `--retries` / `--retry-budget` (or their env vars) resolved to. `null` means "not given": without either,
@@ -14,7 +14,7 @@ export interface RetryOptions {
   retryBudgetMs: number | null;
 }
 
-export function parseRetries(raw: string, source: string): number {
+function parseRetries(raw: string, source: string): number {
   const trimmed = raw.trim();
   const value = /^\d+$/.test(trimmed) ? Number(trimmed) : Number.NaN;
   if (!Number.isSafeInteger(value) || value > MAX_RETRIES) {
@@ -27,7 +27,7 @@ export function parseRetries(raw: string, source: string): number {
   return value;
 }
 
-export function parseRetryBudget(raw: string, source: string): number {
+function parseRetryBudget(raw: string, source: string): number {
   const trimmed = raw.trim();
   const seconds = trimmed === '' ? Number.NaN : Number(trimmed);
   if (!Number.isFinite(seconds) || seconds <= 0 || seconds > MAX_RETRY_BUDGET_SECONDS) {

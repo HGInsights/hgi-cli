@@ -6,9 +6,9 @@ import { parseRetryAfter, sleep, type HttpResponse } from '../http.js';
 
 export const RETRY_BUDGET_MS = 60_000;
 /** The per-request budget when `--retries` is set and `--retry-budget` is not. */
-export const RETRIES_BUDGET_MS = 600_000;
-export const MAX_RATE_RETRIES = 3;
-export const MAX_TRANSIENT_RETRIES = 2;
+const RETRIES_BUDGET_MS = 600_000;
+const MAX_RATE_RETRIES = 3;
+const MAX_TRANSIENT_RETRIES = 2;
 const PRE_DISPATCH_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']);
 
 export interface TransportState {
@@ -18,7 +18,7 @@ export interface TransportState {
   toolsCallSends: number;
 }
 
-export type TransportRetryCode = 'rate_limited' | 'load_shed' | 'not_established';
+type TransportRetryCode = 'rate_limited' | 'load_shed' | 'not_established';
 
 export interface TransportRetryEvent {
   attempt: number;
@@ -159,8 +159,9 @@ export function createTransportFetch(
       if (res.status === 429) {
         const header = parseRetryAfter(res.headers.get('retry-after'));
         await res.body?.cancel().catch(() => undefined);
-        const delaySec = header ?? Math.min(2 ** (rateAttempts + 1), 30) + random();
+        // Without --retries the backoff steps on the shared counter, so a load-shed retry moves it too (as before).
         const used = limits.shared ? rateAttempts + shedAttempts : rateAttempts;
+        const delaySec = header ?? Math.min(2 ** (used + 1), 30) + random();
         if (used >= limits.rate || delaySec * 1000 > remaining()) {
           throw new HgiError('rate_limited', 'The organization is being rate limited by the server.', {
             hint: 'Wait and retry; the limit is shared by every hgi process in your organization.',

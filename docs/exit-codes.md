@@ -89,7 +89,7 @@ What `hgi call` and `hgi run` retry, all before the tool runs:
 | `not_established` | a connection that was refused or did not resolve before the request left; on requests other than `tools/call`, also other network failures and 502/503/504 | 2 | 0.5 s × attempt |
 | `governance_unavailable` | the server could not check the budget (an in-band refusal raised before the tool runs) | not retried | full jitter: random in `[0, min(2^attempt, 30)]` s |
 
-Each wait gets up to 0.25 s of extra jitter (not on `governance_unavailable`). Every wait is bounded by a **retry budget per request** (each `--ids` batch call is its own request): a wait longer than what is left of it ends the retries at once with the final error. The 401 → refresh → retry-once path is separate and is not counted.
+`rate_limited` and `load_shed` waits get up to 0.25 s of extra jitter, which the budget check does not count. Every wait is bounded by a **retry budget per request** (each `--ids` batch call is its own request): a wait longer than what is left of it ends the retries at once with the final error. The 401 → refresh → retry-once path is separate and is not counted.
 
 - `--retries <n>` (or `HGI_RETRIES`; the flag wins), a whole number 0–20: each class above may retry up to n times, each on its own counter. `0` turns every retry off, built-in ones included. On `hgi call` it also re-sends `governance_unavailable` up to n times; `hgi run` never does (exit 7, `retryable: true`, and you decide).
 - `--retry-budget <seconds>` (or `HGI_RETRY_BUDGET`; the flag wins), a positive number up to 3600: the per-request budget. Default 600 when retries are set, else 60. Without `--retries` it raises the budget and keeps the built-in counts.
