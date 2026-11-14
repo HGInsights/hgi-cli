@@ -86,8 +86,10 @@ Options for `call`, `run` and `tools list`:
 - `-f, --format json|jsonl|csv|yaml|table`: JSON when piped, a table on a terminal. See [output formats](docs/output-formats.md).
 - `--select a,b.c`: keep only those fields.
 - `--out <file>`: write the complete result to a new file.
-- `--meta`: print `{result, credit_cost, mcp_version}`.
-- `--timeout <seconds>`: per-request timeout (default 120).
+- `--meta`: print `{result, credit_cost, mcp_version, attempts}`.
+- `--timeout <seconds>`: per-request timeout (default 120). It bounds each attempt, not the waits between retries.
+- `--retries <n>` (0–20): retry a rate limit, the server shedding load, or a connection that was never established up to n times each, and on `call` also a `governance_unavailable` refusal. `0` turns every retry off. Without it, `hgi` keeps its built-in limits (3 and 2). A call that may already have run is never retried. Every retry prints one line on stderr. See [Retries](docs/exit-codes.md#retries).
+- `--retry-budget <seconds>` (at most 3600): the most one request may spend waiting between retries (default 600 with `--retries`, else 60).
 - `--label <label>` (`call` and `run`): tag the call in the credit ledger, for example by pipeline stage. 1 to 64 characters from `A-Z a-z 0-9 . _ : / -`.
 
 Options for `call` only (batching):
@@ -165,6 +167,7 @@ Each row is `{"input": "<your line>", "result": {...}}` or `{"input": "<your lin
 | `HGI_CONFIG_DIR`, `HGI_CACHE_DIR` | explicit directories (must not be inside a git working tree) |
 | `HGI_LEDGER` | credit ledger path (default `<config dir>/ledger.jsonl`; must not be inside a git working tree), or `off` to keep no history |
 | `HGI_MAX_CREDITS` | run cap for `hgi call`, same as `--max-credits` (the flag wins). See [Run cap](docs/exit-codes.md#run-cap) |
+| `HGI_RETRIES`, `HGI_RETRY_BUDGET` | same as `--retries` / `--retry-budget` on `hgi call` and `hgi run` (the flags win). See [Retries](docs/exit-codes.md#retries) |
 | `HGI_BUDGET_ID` | the run a capped `hgi call` counts against (default: the parent process id); when set, also recorded with each call in the credit ledger, to group the calls of one run |
 
 `hgi` sends the User-Agent `hgi/<version>` and has no telemetry: it talks only to the server you configure, and sends nothing to HG Insights or anyone else about how you use it.
