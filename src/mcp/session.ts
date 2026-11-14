@@ -11,7 +11,7 @@ import type { CommandContext } from '../commands/context.js';
 import { mcpUrl, VERSION } from '../config.js';
 import { debug } from '../debug.js';
 import { HgiError, toHgiError } from '../errors.js';
-import { createTransportFetch, type TransportState } from './transport-fetch.js';
+import { createTransportFetch, maxHttpSends, retryLimits, type TransportRetryOptions, type TransportState } from './transport-fetch.js';
 import type { McpTool } from './tools.js';
 
 export interface McpSession {
@@ -86,21 +86,32 @@ function mapMcpErrorInner(err: unknown, state: TransportState): HgiError {
   return toHgiError(err);
 }
 
-export async function openSession(ctx: CommandContext, opts: { timeoutMs: number }): Promise<McpSession> {
-  const state: TransportState = { mcpVersion: null, toolsCallWritten: false };
+/**
+ * The SDK's own request timeout rejects without aborting the fetch, so it must never fire while the transport is
+ * still retrying: it would report a failure while a retry could still send the request. It is therefore a backstop
+ * over the transport's worst case. Each HTTP attempt stays bounded by `--timeout` (in `httpRequest`).
+ */
+export function sdkTimeoutMs(timeoutMs: number, retry: TransportRetryOptions = {}): number {
+  const limits = retryLimits(retry);
+  const sends = maxHttpSends(limits);
+  return timeoutMs * sends + limits.budgetMs + 250 * sends + 5_000;
+}
+
+export async function openSession(ctx: CommandContext, opts: { timeoutMs: number; retry?: TransportRetryOptions }): Promise<McpSession> {
+  const state: TransportState = { mcpVersion: null, toolsCallWritten: false, toolsCallSends: 0 };
   const transport = new StreamableHTTPClientTransport(new URL(mcpUrl(ctx.base)), {
-    fetch: createTransportFetch(ctx.authedFetch, state, { timeoutMs: opts.timeoutMs }) as never,
+    fetch: createTransportFetch(ctx.authedFetch, state, { timeoutMs: opts.timeoutMs, ...opts.retry }) as never,
   });
   const client = new Client({ name: 'hgi', version: VERSION }, { capabilities: {} });
+  const requestOptions = { timeout: sdkTimeoutMs(opts.timeoutMs, opts.retry) };
 
   try {
-    await client.connect(transport);
+    await client.connect(transport, requestOptions);
   } catch (err) {
     await transport.close().catch(() => undefined);
     throw mapMcpError(err, state);
   }
   const info = client.getServerVersion();
-  const requestOptions = { timeout: opts.timeoutMs };
 
   return {
     state,

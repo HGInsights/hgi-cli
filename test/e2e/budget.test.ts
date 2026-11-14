@@ -265,3 +265,38 @@ describe('Story 6: broken or unexpected state fails safely', () => {
     expect(fs.readFileSync(target, 'utf8')).toBe('untouched');
   });
 });
+
+describe('issue #32: governance_unavailable re-sends under the ledger and the run cap', () => {
+  beforeEach(() => login(sb));
+  const governance = (cost?: number) => ({
+    isError: true,
+    content: [{ type: 'text' as const, text: 'Budget service down.' }],
+    _meta: { errorCode: 'governance_unavailable', ...(cost !== undefined ? { creditCost: cost } : {}) },
+  });
+  const failThen = (fails: number, cost?: number) => {
+    let n = 0;
+    server.handlers.set('company_lookup', () => (n++ < fails ? governance(cost) : textResult({ name: 'Acme' }, 2)));
+  };
+  const ledgerRows = () =>
+    fs
+      .readFileSync(path.join(sb.configDir, 'ledger.jsonl'), 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as { status: string; tool: string });
+
+  it('every attempt that came back gets a ledger row and counts against the run cap', async () => {
+    failThen(2);
+    const res = await lookup(['--retries', '3', '--max-credits', '50']);
+    expect(res.code, res.stderr).toBe(0);
+    expect(ledgerRows().map((r) => r.status)).toEqual(['tool_error', 'tool_error', 'ok']);
+    expect(await status()).toMatchObject({ calls: 3, spent: 2 });
+  });
+
+  it('a cap reached by a refused attempt stops the re-send: exit 13, nothing more sent', async () => {
+    failThen(5, 5);
+    const err = expectError(await lookup(['--retries', '3', '--max-credits', '5']), 13, 'budget_exceeded');
+    expect(err.details).toMatchObject({ spent: 5, max: 5 });
+    expect(server.toolCalls()).toHaveLength(1);
+    expect(ledgerRows().map((r) => r.status)).toEqual(['tool_error']);
+  });
+});

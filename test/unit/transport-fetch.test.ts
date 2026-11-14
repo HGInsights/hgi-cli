@@ -2,13 +2,22 @@ import { describe, expect, it } from 'vitest';
 import type { AuthedFetch } from '../../src/authed-fetch.js';
 import { HgiError } from '../../src/errors.js';
 import { mapMcpError } from '../../src/mcp/session.js';
-import { createTransportFetch, type TransportState } from '../../src/mcp/transport-fetch.js';
+import { sdkTimeoutMs } from '../../src/mcp/session.js';
+import {
+  createTransportFetch,
+  maxHttpSends,
+  retryLimits,
+  type TransportFetchOptions,
+  type TransportRetryEvent,
+  type TransportState,
+} from '../../src/mcp/transport-fetch.js';
 
 type Step = Response | HgiError;
 
-function harness(steps: Step[], startTime = 0) {
+function harness(steps: Step[], startTime = 0, extra: Partial<TransportFetchOptions> = {}) {
   const calls: string[] = [];
   const waits: number[] = [];
+  const events: TransportRetryEvent[] = [];
   let clock = startTime;
   const authed: AuthedFetch = async (_url, init) => {
     calls.push(JSON.parse(String(init?.body ?? '{}')).method ?? String(init?.method));
@@ -17,7 +26,7 @@ function harness(steps: Step[], startTime = 0) {
     if (step instanceof HgiError) throw step;
     return step as never;
   };
-  const state: TransportState = { mcpVersion: null, toolsCallWritten: false };
+  const state: TransportState = { mcpVersion: null, toolsCallWritten: false, toolsCallSends: 0 };
   const fetchFn = createTransportFetch(authed, state, {
     timeoutMs: 1000,
     sleepFn: async (ms) => {
@@ -26,8 +35,10 @@ function harness(steps: Step[], startTime = 0) {
     },
     now: () => clock,
     random: () => 0,
+    onRetry: (e) => events.push(e),
+    ...extra,
   });
-  return { fetchFn, calls, waits, state };
+  return { fetchFn, calls, waits, state, events };
 }
 
 const post = (method: string) => ({ method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method }) });
@@ -103,7 +114,7 @@ describe('abort signal from the SDK', () => {
       calls.push(String(init?.method));
       return json(429, {}, { 'retry-after': '1' }) as never;
     };
-    const fetchFn = createTransportFetch(authed, { mcpVersion: null, toolsCallWritten: false }, {
+    const fetchFn = createTransportFetch(authed, { mcpVersion: null, toolsCallWritten: false, toolsCallSends: 0 }, {
       timeoutMs: 1000,
       sleepFn: async (_ms, signal) => {
         controller.abort(new Error('sdk timeout'));
@@ -142,8 +153,8 @@ describe('non-call requests', () => {
 });
 
 describe('mapMcpError marks every post-dispatch network-class failure outcome_unknown', () => {
-  const written = { mcpVersion: null, toolsCallWritten: true };
-  const notWritten = { mcpVersion: null, toolsCallWritten: false };
+  const written = { mcpVersion: null, toolsCallWritten: true, toolsCallSends: 0 };
+  const notWritten = { mcpVersion: null, toolsCallWritten: false, toolsCallSends: 0 };
   it('a proxy-classified failure after tools/call was sent is outcome_unknown, not a "fix your proxy and retry"', () => {
     const err = mapMcpError(new HgiError('network_proxy_tls', 'proxy reset', { details: { cause: 'ECONNRESET', proxy: 'p:1' } }), written);
     expect(err.code).toBe('network_proxy_tls');
@@ -160,5 +171,152 @@ describe('mapMcpError marks every post-dispatch network-class failure outcome_un
     const shed = new HgiError('server_unreachable', 'shed', { details: { outcome_unknown: false } });
     expect(mapMcpError(shed, written).details?.outcome_unknown).toBe(false);
     expect(mapMcpError(new HgiError('server_unreachable', 'x'), notWritten).details?.outcome_unknown).toBeUndefined();
+  });
+});
+
+describe('--retries / --retry-budget (issue #32)', () => {
+  const shed = () => json(503, { jsonrpc: '2.0', error: { code: -32000, message: 'busy' }, id: null }, { 'retry-after': '1' });
+  const refused = () => unreachable('ECONNREFUSED');
+  const ok = () => json(200, {});
+
+  it('rides out four 429s with Retry-After: 50 (200 s of waits, inside the 600 s default budget)', async () => {
+    const h = harness([...Array.from({ length: 4 }, () => json(429, {}, { 'retry-after': '50' })), ok()], 0, { retries: 6 });
+    expect((await h.fetchFn('http://x', post('tools/call'))).status).toBe(200);
+    expect(h.waits).toEqual([50_000, 50_000, 50_000, 50_000]);
+    expect(h.state.toolsCallSends).toBe(5);
+  });
+  it('the same 429s without --retries end with rate_limited once the 60 s budget cannot fit the next wait, as before', async () => {
+    const h = harness(Array.from({ length: 4 }, () => json(429, {}, { 'retry-after': '50' })));
+    await expect(h.fetchFn('http://x', post('tools/call'))).rejects.toMatchObject({ code: 'rate_limited', details: { attempts: 2 } });
+    expect(h.waits).toEqual([50_000]);
+  });
+  it('rides out five load-shed 503s and five refused connections', async () => {
+    const a = harness([shed(), shed(), shed(), shed(), shed(), ok()], 0, { retries: 6 });
+    expect((await a.fetchFn('http://x', post('tools/call'))).status).toBe(200);
+    expect(a.events.map((e) => e.code)).toEqual(Array(5).fill('load_shed'));
+    const b = harness([refused(), refused(), refused(), refused(), refused(), ok()], 0, { retries: 6 });
+    expect((await b.fetchFn('http://x', post('tools/call'))).status).toBe(200);
+    expect(b.waits).toEqual([500, 1000, 1500, 2000, 2500]);
+    expect(b.events.map((e) => e.code)).toEqual(Array(5).fill('not_established'));
+  });
+  it('counts each class separately: 3 refused, 3 load-shed and 3 429s, then success, with --retries 3', async () => {
+    const h = harness([refused(), refused(), refused(), shed(), shed(), shed(), json(429, {}), json(429, {}), json(429, {}), ok()], 0, {
+      retries: 3,
+    });
+    expect((await h.fetchFn('http://x', post('tools/call'))).status).toBe(200);
+    expect(h.events.map((e) => `${e.code}:${e.attempt}/${e.max}`)).toEqual([
+      'not_established:1/3',
+      'not_established:2/3',
+      'not_established:3/3',
+      'load_shed:1/3',
+      'load_shed:2/3',
+      'load_shed:3/3',
+      'rate_limited:1/3',
+      'rate_limited:2/3',
+      'rate_limited:3/3',
+    ]);
+  });
+  it('without --retries, 429 and load-shed share one counter of 3 and the line reports max 3', async () => {
+    const h = harness([json(429, {}, { 'retry-after': '1' }), shed(), json(429, {}, { 'retry-after': '1' }), shed()]);
+    await expect(h.fetchFn('http://x', post('tools/call'))).rejects.toMatchObject({
+      code: 'server_unreachable',
+      details: { outcome_unknown: false, attempts: 4 },
+    });
+    expect(h.events.map((e) => `${e.code}:${e.attempt}/${e.max}`)).toEqual(['rate_limited:1/3', 'load_shed:2/3', 'rate_limited:3/3']);
+  });
+  it('--retry-budget 120: a Retry-After longer than what is left ends the retries at once', async () => {
+    const h = harness([json(429, {}, { 'retry-after': '100' }), json(429, {}, { 'retry-after': '30' })], 0, {
+      retries: 6,
+      retryBudgetMs: 120_000,
+    });
+    await expect(h.fetchFn('http://x', post('tools/call'))).rejects.toMatchObject({
+      code: 'rate_limited',
+      details: { retry_after_seconds: 30, attempts: 2 },
+    });
+    expect(h.waits).toEqual([100_000]);
+  });
+  it('--retries set and no --retry-budget: the budget is 600 s', async () => {
+    const fits = harness([json(429, {}, { 'retry-after': '599' }), ok()], 0, { retries: 1 });
+    expect((await fits.fetchFn('http://x', post('tools/call'))).status).toBe(200);
+    const over = harness([json(429, {}, { 'retry-after': '601' })], 0, { retries: 1 });
+    await expect(over.fetchFn('http://x', post('tools/call'))).rejects.toMatchObject({ code: 'rate_limited', details: { attempts: 1 } });
+    expect(over.waits).toEqual([]);
+  });
+  it('--retry-budget alone raises the budget and keeps the built-in counts', async () => {
+    const h = harness([json(429, {}, { 'retry-after': '100' }), json(429, {}, { 'retry-after': '100' }), ok()], 0, {
+      retryBudgetMs: 600_000,
+    });
+    expect((await h.fetchFn('http://x', post('tools/call'))).status).toBe(200);
+    expect(h.events.map((e) => e.max)).toEqual([3, 3]);
+  });
+  it('--retry-budget alone also bounds the not-established waits; without options they are not budget-checked, as before', async () => {
+    const h = harness([refused(), refused(), ok()], 0, { retryBudgetMs: 1000 });
+    await expect(h.fetchFn('http://x', post('tools/call'))).rejects.toMatchObject({ code: 'server_unreachable', details: { attempts: 2 } });
+    expect(h.waits).toEqual([500]);
+    const none = harness([refused(), refused(), ok()], 0, {});
+    expect((await none.fetchFn('http://x', post('tools/call'))).status).toBe(200);
+    expect(none.waits).toEqual([500, 1000]);
+  });
+  it('--retries 0: a single 429 is rate_limited with no wait, a single refused connection is server_unreachable', async () => {
+    const a = harness([json(429, {}, { 'retry-after': '1' }), ok()], 0, { retries: 0 });
+    await expect(a.fetchFn('http://x', post('tools/call'))).rejects.toMatchObject({ code: 'rate_limited', details: { attempts: 1 } });
+    expect(a.waits).toEqual([]);
+    const b = harness([refused(), ok()], 0, { retries: 0 });
+    await expect(b.fetchFn('http://x', post('tools/call'))).rejects.toMatchObject({ code: 'server_unreachable', details: { attempts: 1 } });
+    expect(b.calls).toHaveLength(1);
+    const c = harness([shed(), ok()], 0, { retries: 0 });
+    await expect(c.fetchFn('http://x', post('tools/list'))).rejects.toMatchObject({
+      code: 'server_unreachable',
+      details: { outcome_unknown: false },
+    });
+    const d = harness([json(502, {}), ok()], 0, { retries: 0 });
+    await expect(d.fetchFn('http://x', post('tools/list'))).rejects.toMatchObject({ code: 'server_unreachable' });
+    expect(d.calls).toHaveLength(1);
+  });
+  it('never retries after a tools/call was sent, whatever --retries says', async () => {
+    for (const step of [unreachable('ECONNRESET'), json(500, {}), json(502, {}), json(503, { error: 'x' })]) {
+      const h = harness([step, ok()], 0, { retries: 6 });
+      await expect(h.fetchFn('http://x', post('tools/call'))).rejects.toMatchObject({ details: { outcome_unknown: true } });
+      expect(h.calls).toHaveLength(1);
+      expect(h.events).toEqual([]);
+    }
+  });
+  it('a TLS or proxy failure (exit 9) is never retried', async () => {
+    const tls = new HgiError('network_proxy_tls', 'TLS verification failed', { details: { cause: 'SELF_SIGNED_CERT_IN_CHAIN' } });
+    for (const method of ['tools/call', 'tools/list']) {
+      const h = harness([tls, ok()], 0, { retries: 6 });
+      await expect(h.fetchFn('http://x', post(method))).rejects.toMatchObject({ code: 'network_proxy_tls' });
+      expect(h.calls).toHaveLength(1);
+    }
+  });
+  it('reports the wait it actually sleeps, jitter included, and keeps both random draws of the no-Retry-After backoff', async () => {
+    const h = harness([json(429, {}), ok()], 0, { random: () => 0.5 });
+    expect((await h.fetchFn('http://x', post('tools/call'))).status).toBe(200);
+    expect(h.waits).toEqual([(2 + 0.5) * 1000 + 0.5 * 250]);
+    expect(h.events).toEqual([{ attempt: 1, max: 3, code: 'rate_limited', wait_seconds: 2.6 }]);
+    const shedWait = harness([shed(), ok()], 0, { random: () => 0.5 });
+    await shedWait.fetchFn('http://x', post('tools/call'));
+    expect(shedWait.waits).toEqual([1125]);
+    expect(shedWait.events[0]?.wait_seconds).toBe(1.1);
+  });
+  it('counts tools/call sends only, not other requests', async () => {
+    const h = harness([json(429, {}, { 'retry-after': '1' }), ok(), ok()]);
+    await h.fetchFn('http://x', post('tools/call'));
+    await h.fetchFn('http://x', post('tools/list'));
+    expect(h.state.toolsCallSends).toBe(2);
+  });
+});
+
+describe('the SDK timeout is a backstop over the transport worst case', () => {
+  it('exceeds every send at the per-attempt timeout plus the whole budget', () => {
+    for (const retry of [{}, { retries: 0 }, { retries: 6 }, { retries: 20, retryBudgetMs: 3_600_000 }, { retryBudgetMs: 600_000 }]) {
+      const limits = retryLimits(retry);
+      const sends = maxHttpSends(limits);
+      expect(sdkTimeoutMs(120_000, retry)).toBeGreaterThan(120_000 * sends + limits.budgetMs + 250 * sends);
+    }
+  });
+  it('counts every class: 2 × (1 + 3 + 2) sends by default, 2 × (1 + 3 × N) with --retries N', () => {
+    expect(maxHttpSends(retryLimits({}))).toBe(12);
+    expect(maxHttpSends(retryLimits({ retries: 6 }))).toBe(38);
   });
 });

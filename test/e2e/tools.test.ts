@@ -125,16 +125,16 @@ describe('Story 3: lookups', () => {
     const res = await lookup(['--select', 'name,employees']);
     expect(JSON.parse(res.stdout)).toEqual({ name: 'Acme', employees: 120 });
   });
-  it('--meta wraps result, credit_cost and mcp_version; a tool with no cost reports null', async () => {
+  it('--meta wraps result, credit_cost, mcp_version and attempts; a tool with no cost reports null', async () => {
     const meta = JSON.parse((await lookup(['--meta'])).stdout) as Record<string, unknown>;
-    expect(meta).toEqual({ result: { domain: 'acme.com', name: 'Acme', employees: 120 }, credit_cost: 2, mcp_version: 'v2' });
+    expect(meta).toEqual({ result: { domain: 'acme.com', name: 'Acme', employees: 120 }, credit_cost: 2, mcp_version: 'v2', attempts: 1 });
     const agg = await runCli(['run', 'aggregated_thing', '--meta'], sb.env);
     expect(JSON.parse(agg.stdout)).toMatchObject({ credit_cost: null });
     expect(agg.stderr).toContain('"credit_cost":null');
   });
   it('--select applies to the result inside the --meta envelope', async () => {
     const res = await lookup(['--meta', '--select', 'name']);
-    expect(JSON.parse(res.stdout)).toEqual({ result: { name: 'Acme' }, credit_cost: 2, mcp_version: 'v2' });
+    expect(JSON.parse(res.stdout)).toEqual({ result: { name: 'Acme' }, credit_cost: 2, mcp_version: 'v2', attempts: 1 });
   });
   it('--no-validate lets the server judge input the client schema would refuse', async () => {
     server.handlers.set('company_lookup', () => ({ isError: true, content: [{ type: 'text', text: 'server says no' }] }));
