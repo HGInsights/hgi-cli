@@ -1,4 +1,5 @@
 import { HgiError } from '../errors.js';
+import { hasType, isArrayOfObjects, isRecord, propertiesOf } from '../mcp/schema-shape.js';
 import type { McpTool } from '../mcp/tools.js';
 import { classify, normalize, type IdKind, type IdLine } from './ids.js';
 
@@ -11,8 +12,8 @@ const FIELD_FOR: Record<IdKind, 'hg_ids' | 'domains'> = { id: 'hg_ids', domain: 
  * The keys an entry is matched on, in order. Fixed on purpose: entries carry other `*_id` fields (parent ids), and
  * deriving keys from the schema could silently mis-join rows.
  */
-const ID_MATCH_KEYS = ['company_id', 'requested_hg_id', 'organization_id'] as const;
-const DOMAIN_MATCH_KEY = 'company_domain';
+export const ID_MATCH_KEYS = ['company_id', 'requested_hg_id', 'organization_id'] as const;
+export const DOMAIN_MATCH_KEY = 'company_domain';
 
 export interface BatchField {
   field: 'hg_ids' | 'domains';
@@ -22,14 +23,6 @@ export interface BatchField {
 }
 
 export type BatchFields = Partial<Record<IdKind, BatchField>>;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function hasType(schema: Record<string, unknown>, type: string): boolean {
-  return schema.type === type || (Array.isArray(schema.type) && schema.type.includes(type));
-}
 
 export function batchFields(tool: McpTool): BatchFields {
   const props = isRecord(tool.inputSchema.properties) ? tool.inputSchema.properties : {};
@@ -51,12 +44,7 @@ export function batchFields(tool: McpTool): BatchFields {
 
 /** The output schema's single top-level array-of-objects property, else `companies`. */
 export function entriesKey(tool: McpTool): string {
-  const props = isRecord(tool.outputSchema?.properties) ? tool.outputSchema.properties : {};
-  const candidates = Object.entries(props).filter(([, schema]) => {
-    if (!isRecord(schema) || !hasType(schema, 'array')) return false;
-    const items = schema.items;
-    return isRecord(items) && (hasType(items, 'object') || isRecord(items.properties));
-  });
+  const candidates = Object.entries(propertiesOf(tool.outputSchema)).filter(([, schema]) => isArrayOfObjects(schema));
   return candidates.length === 1 ? (candidates[0] as [string, unknown])[0] : 'companies';
 }
 
@@ -132,7 +120,7 @@ function usableMax(field: BatchField): number {
   });
 }
 
-function keyText(value: unknown): string | null {
+export function keyText(value: unknown): string | null {
   if (typeof value === 'string') return value;
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   return null;

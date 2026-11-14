@@ -88,24 +88,29 @@ describe('SKILL.md (Story 10)', () => {
   });
   it('Score: safe paging, intent on the web domain, the observed baseline, the 422 and filtered summaries', () => {
     const recipe = section('### Score fit and propensity');
-    expect(recipe).toMatch(/Stop on a short page[^\n]*`total_installs_count` is reached[^\n]*`offset` maximum/);
-    expect(recipe).toMatch(/Don't stop on `has_more` alone/);
-    expect(recipe).toMatch(/report the result as partial/);
+    expect(recipe).toMatch(/1\. \*\*Fit:\*\*[^\n]*with `--all-pages`/);
+    expect(recipe).toMatch(/stops on a short page or `total_installs_count`, not on `has_more` alone/);
+    expect(recipe).toMatch(/`truncated: true` is partial: say so/);
     expect(recipe).toMatch(/`company_intent` on the company's web domain[^\n]*Accor had 0 topics on its HQ id and 18 on `accor\.com` \(observed/);
     expect(recipe).toMatch(/about 70% of the ~20,000-topic catalogue \(observed\)/);
     expect(recipe).toMatch(/A summary with `topic_ids` counts only those topics/);
     expect(recipe).toMatch(/`fields:\["summary"\]` without a topic filter rejects `granularity` \(422\)/);
     expect(recipe).toMatch(/`fields:\["topics"\]`, pass `granularity:"global"`/);
   });
-  it('Score: the example page loop reads its limits from the schema and has real stop conditions', () => {
-    const loop = /```bash\n(# technographics page loop[\s\S]*?\ndone)\n/.exec(section('### Score fit and propensity'))?.[1] ?? '';
-    expect(loop).toMatch(/hgi tools list --json \| jq[^\n]*company_technographic/);
-    expect(loop).toMatch(/\.max_results\.maximum[\s\S]*\.offset\.maximum/);
-    expect(loop).toMatch(/while \[ "\$ids" != "\[\]" \]/);
-    expect(loop).toMatch(/-gt "\$maxoff" \]; then echo "partial[^\n]*break; fi/);
-    expect(loop).toMatch(/\.installs_count == \$max and \$off \+ \$max < \.total_installs_count\) \| \.company_id\] \| sort'/);
-    expect(loop).toMatch(/dir=\$\(mktemp -d\)/);
-    expect(loop).not.toMatch(/> "tech-/);
+  it('Score: the example pages with --all-pages, capped, with the page size from the schema', () => {
+    const block = /```bash\n([\s\S]*?)```/.exec(section('### Score fit and propensity'))?.[1] ?? '';
+    expect(block).toMatch(/hgi call company_technographic --all-pages --max-pages \d+/);
+    expect(block).toMatch(/"max_results":<schema maximum>/);
+    expect(block).not.toMatch(/"offset"/);
+    expect(block).toMatch(/details\.partial_result/);
+  });
+  it('Paging: tells agents to use --all-pages, that each page is billed, and what truncated means', () => {
+    const paging = section('### Paging (`--all-pages`)');
+    expect(paging).toMatch(/instead of an `offset` loop/);
+    expect(paging).toMatch(/\*\*Each extra page is a separate, billed call\.\*\*/);
+    expect(paging).toMatch(/never on `has_more: true` alone/);
+    expect(paging).toMatch(/`truncated_reason`: `max_pages`, `unmatched`/);
+    expect(paging).toMatch(/`not_pageable`/);
   });
   it('takes limits from the schema, never quoting a number for them', () => {
     const recipes = section('## Recipes');
