@@ -9,9 +9,9 @@ Every failure has its own exit code, so a script can branch without parsing Engl
 | 2 | `invalid_input` | bad flags or usage; invalid JSON; input that fails the tool's schema; unknown tool; unreadable `--input @file` or `--ids @file`; `--out` refusals (exists, symlink, protected path, `--force` on `call`); config-dir or `HGI_LEDGER` workspace guard (`workspace_guard`); a bad `--label` (`bad_label`), `hgi usage --since` (`bad_since`) or `--by` (`bad_by`); any `--ids` refusal (see [below](#partial-output-from---ids)). Nothing is sent |
 | 3 | `tool_error` | the tool returned `isError` (including server-side invalid arguments, which the server reports in-band), a JSON-RPC error, or a response `hgi` could not parse after the call was sent. With `--ids`: at least one batch call failed (every row is printed first) |
 | 4 | `login_required`, `login_expired`, `phoenix_account_required` | no credentials; a second 401 after one refresh; the refresh token was rejected (`invalid_grant`). `phoenix_account_required`: the server says the signed-in identity has no Phoenix account; sign up, or sign in with `hgi auth login` as an account that has one |
-| 5 | `rate_limited` | 429 after bounded retries (MCP calls); a 429 from the userinfo or revoke endpoint exits at once |
+| 5 | `rate_limited` | 429 after bounded retries (MCP calls: 3 by default, `--retries` to change; see [Retries](#retries)), or a `Retry-After` longer than what is left of the retry budget; `details.attempts` says how many times the request was sent. A 429 from the userinfo or revoke endpoint exits at once |
 | 6 | `credit_limit_exceeded`, `user_credit_limit_exceeded` | the server refused the call: your organization's credit allowance (`credit_limit_exceeded`) or your personal credit budget (`user_credit_limit_exceeded`) is used up. Retrying will not help; ask an admin, or wait for the next billing period |
-| 7 | `server_unreachable`, `governance_unavailable` | `governance_unavailable`: the server could not check your budget, so nothing ran (`details.retryable: true`, `details.outcome_unknown: false`); retry shortly. `hgi` never retries it itself. `server_unreachable`: DNS failure, refused connection, timeout, HTTP 5xx, an unexpected redirect from the MCP endpoint, the server shedding load after retries, or the server choosing an MCP protocol version this `hgi` does not speak (`details.reason` is `unsupported_protocol_version`; upgrade `hgi`) |
+| 7 | `server_unreachable`, `governance_unavailable` | `governance_unavailable`: the server could not check your budget, so nothing ran (`details.retryable: true`, `details.outcome_unknown: false`); retry shortly. `hgi call --retries <n>` re-sends it up to n times itself (then `details.attempts` is set); without `--retries`, and always on `hgi run`, it is not retried. `server_unreachable`: DNS failure, refused connection, timeout, HTTP 5xx, an unexpected redirect from the MCP endpoint, the server shedding load after retries (`details.attempts`), or the server choosing an MCP protocol version this `hgi` does not speak (`details.reason` is `unsupported_protocol_version`; upgrade `hgi`) |
 | 8 | `oauth_error` | discovery or issuer mismatch, state or redirect mismatch, consent denied, a rejected or reused sign-in code, a token-endpoint failure, an unexpected redirect on an auth request |
 | 9 | `network_proxy_tls` | TLS verification failure or proxy failure; the message names the cause (for example `DEPTH_ZERO_SELF_SIGNED_CERT`) |
 | 10 | `wrong_verb` | `hgi call` on a state-changing tool, or `hgi run` on a read-only one. Nothing is sent |
@@ -33,9 +33,10 @@ When stderr is not a terminal (or you pass `--json-errors`), errors are one JSON
 - `code` and `exit_code` are stable. `message` and `hint` are for humans.
 - `details` carries machine-readable context where it exists:
   - `retry_after_seconds` on `rate_limited`
+  - `attempts` when retries ran out (`rate_limited`, an exhausted load-shed or refused connection, `governance_unavailable` on `hgi call --retries`): how many times the failing request was sent, 1 + its retries
   - `outcome_unknown` on `tools/call` failures (see below)
   - `expected_verb` on `wrong_verb`
-  - `reason` on `invalid_input` and `oauth_error` (for example `unknown_tool`, `schema`, `state_mismatch`)
+  - `reason` on `invalid_input` and `oauth_error` (for example `unknown_tool`, `schema`, `state_mismatch`, `bad_retries`, `bad_retry_budget`)
   - `cause` on `server_unreachable` and `network_proxy_tls` (a Node error code)
   - `location_host` on an unexpected redirect
   - `tool` and `server_error_code` on every error from a tool result (`server_error_code` is the server's raw `_meta.errorCode`, when it sent one; an unknown one stays `tool_error`)
@@ -74,6 +75,30 @@ Exit 2 refusals specific to `--ids`, each before anything is sent (`details.reas
 ## `outcome_unknown`
 
 `hgi` retries only failures that happen **before the server runs the tool**: a 401 (after a refresh), a 429, the server's 503 "shedding load" response, and a refused or unresolvable connection. If a connection drops, times out, a proxy resets it, or a 5xx arrives **after** a `tools/call` was sent, it is not retried, because `hgi run` could start the work twice. The error then has `"outcome_unknown": true` and a hint to check state first. This marker is added to every network-class or unclassified failure once the call was sent, so it can appear with exit 1, 7 or 9. An exhausted load-shed retry has `"outcome_unknown": false`: nothing ran and retrying is safe.
+
+A failure with `"outcome_unknown": true` is never retried, whatever `--retries` says. Neither is a TLS or proxy failure (exit 9: waiting does not fix it) or any exit 2, 3, 4, 6, 8, 10, 11, 12 or 13.
+
+### Retries
+
+What `hgi call` and `hgi run` retry, all before the tool runs:
+
+| `code` in the retry line | What | Default limit | Wait |
+|---|---|---|---|
+| `rate_limited` | a 429 | 3, shared with `load_shed` | `Retry-After`, else 2, 4, 8 … s (at most 30) plus up to 1 s |
+| `load_shed` | the server's 503 "shedding load" (503 + `Retry-After` + JSON-RPC `-32000`) | 3, shared with `rate_limited` | `Retry-After` |
+| `not_established` | a connection that was refused or did not resolve before the request left; on requests other than `tools/call`, also other network failures and 502/503/504 | 2 | 0.5 s × attempt |
+| `governance_unavailable` | the server could not check the budget (an in-band refusal raised before the tool runs) | not retried | full jitter: random in `[0, min(2^attempt, 30)]` s |
+
+`rate_limited` and `load_shed` waits get up to 0.25 s of extra jitter, which the budget check does not count. Every wait is bounded by a **retry budget per request** (each `--ids` batch call is its own request): a wait longer than what is left of it ends the retries at once with the final error. The 401 → refresh → retry-once path is separate and is not counted.
+
+- `--retries <n>` (or `HGI_RETRIES`; the flag wins), a whole number 0–20: each class above may retry up to n times, each on its own counter. `0` turns every retry off, built-in ones included. On `hgi call` it also re-sends `governance_unavailable` up to n times; `hgi run` never does (exit 7, `retryable: true`, and you decide).
+- `--retry-budget <seconds>` (or `HGI_RETRY_BUDGET`; the flag wins), a positive number up to 3600: the per-request budget. Default 600 when retries are set, else 60. Without `--retries` it raises the budget and keeps the built-in counts.
+- A bad value exits 2 `invalid_input` (`details.reason` `bad_retries` or `bad_retry_budget`) before credentials are read or anything is sent.
+- `--timeout` bounds each attempt, not the waits between them.
+- Each `governance_unavailable` attempt that came back is recorded like a single call: one credit-ledger row (`status: "tool_error"`) and, under a [run cap](#run-cap), its reported cost. The cap is checked again right before every re-send; when it is reached, the re-send is not sent and the command exits 13. Refused attempts are not billed, so `credit_cost` is the last attempt's.
+- Every retry prints one line on stderr before its wait ([output formats](output-formats.md#retry-lines)).
+
+`governance_unavailable` is the one in-band refusal `hgi` re-sends, because the server raises it before the tool runs (see `CONTRIBUTING.md` → Ground rules), and only on the read-only verb.
 
 ## Credit cost
 

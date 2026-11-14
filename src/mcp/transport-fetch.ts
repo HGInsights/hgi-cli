@@ -5,6 +5,8 @@ import { HgiError, networkErrorCode } from '../errors.js';
 import { parseRetryAfter, sleep, type HttpResponse } from '../http.js';
 
 export const RETRY_BUDGET_MS = 60_000;
+/** The per-request budget when `--retries` is set and `--retry-budget` is not. */
+const RETRIES_BUDGET_MS = 600_000;
 const MAX_RATE_RETRIES = 3;
 const MAX_TRANSIENT_RETRIES = 2;
 const PRE_DISPATCH_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']);
@@ -12,13 +14,59 @@ const PRE_DISPATCH_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']);
 export interface TransportState {
   mcpVersion: string | null;
   toolsCallWritten: boolean;
+  /** How many times a `tools/call` was handed to the network (retries included; the 401 refresh resend is not counted). */
+  toolsCallSends: number;
 }
 
-export interface TransportFetchOptions {
+type TransportRetryCode = 'rate_limited' | 'load_shed' | 'not_established';
+
+export interface TransportRetryEvent {
+  attempt: number;
+  max: number;
+  code: TransportRetryCode;
+  wait_seconds: number;
+}
+
+export interface TransportRetryOptions {
+  /** `--retries`: every retry class allows up to this many retries, each on its own counter. Undefined: built-in limits. */
+  retries?: number;
+  /** `--retry-budget` in ms. Undefined: 600 s when `retries` is set, else 60 s. */
+  retryBudgetMs?: number;
+  /** Called before every wait, with the wait that follows. */
+  onRetry?: (e: TransportRetryEvent) => void;
+}
+
+export interface TransportFetchOptions extends TransportRetryOptions {
   timeoutMs: number;
   sleepFn?: (ms: number, signal?: AbortSignal | null) => Promise<void>;
   now?: () => number;
   random?: () => number;
+}
+
+export interface RetryLimits {
+  rate: number;
+  shed: number;
+  transient: number;
+  /** Without `--retries`, 429 and load-shed share one counter (`rate`), as before the option existed. */
+  shared: boolean;
+  budgetMs: number;
+  /** Either option was given: not-established waits are then checked against the budget too. */
+  configured: boolean;
+}
+
+export function retryLimits(opts: TransportRetryOptions): RetryLimits {
+  const configured = opts.retries !== undefined || opts.retryBudgetMs !== undefined;
+  const budgetMs = opts.retryBudgetMs ?? (opts.retries !== undefined ? RETRIES_BUDGET_MS : RETRY_BUDGET_MS);
+  if (opts.retries !== undefined) {
+    return { rate: opts.retries, shed: opts.retries, transient: opts.retries, shared: false, budgetMs, configured };
+  }
+  return { rate: MAX_RATE_RETRIES, shed: MAX_RATE_RETRIES, transient: MAX_TRANSIENT_RETRIES, shared: true, budgetMs, configured };
+}
+
+/** The most HTTP sends one request can make: the first, every retry, and a 401 refresh resend for each. */
+export function maxHttpSends(limits: RetryLimits): number {
+  const retries = (limits.shared ? limits.rate : limits.rate + limits.shed) + limits.transient;
+  return 2 * (1 + retries);
 }
 
 function rpcMethod(init: UndiciInit | undefined): string | undefined {
@@ -52,6 +100,7 @@ export function createTransportFetch(
   const wait = opts.sleepFn ?? sleep;
   const now = opts.now ?? Date.now;
   const random = opts.random ?? Math.random;
+  const limits = retryLimits(opts);
 
   return async (url, rawInit) => {
     const init = (rawInit ?? {}) as UndiciInit;
@@ -61,35 +110,46 @@ export function createTransportFetch(
     const signal = init.signal as AbortSignal | null | undefined;
     const started = now();
     let rateAttempts = 0;
+    let shedAttempts = 0;
     let transientAttempts = 0;
+    let sends = 0;
+    const remaining = () => limits.budgetMs - (now() - started);
+    /** Checked only when an option was given, so the defaults behave exactly as before the options existed. */
+    const transientFits = () => !limits.configured || 500 * (transientAttempts + 1) <= remaining();
+    const retryWait = async (code: TransportRetryCode, attempt: number, max: number, ms: number) => {
+      opts.onRetry?.({ attempt, max, code, wait_seconds: Math.round(ms / 100) / 10 });
+      await wait(ms, signal);
+    };
 
     for (;;) {
       if (signal?.aborted) throw signal.reason;
       let res: HttpResponse;
       try {
-        if (isToolsCall) state.toolsCallWritten = true;
+        if (isToolsCall) {
+          state.toolsCallWritten = true;
+          state.toolsCallSends += 1;
+        }
+        sends += 1;
         res = await authed(String(url), init, { redirectKind: 'mcp', context: 'the MCP server', timeoutMs: opts.timeoutMs });
       } catch (err) {
         if (!(err instanceof HgiError) || err.code !== 'server_unreachable') throw err;
         const cause = networkErrorCode(err.cause) ?? (err.details?.cause as string | undefined);
+        const preDispatch = Boolean(cause && PRE_DISPATCH_CODES.has(cause));
+        if ((!isToolsCall || preDispatch) && transientAttempts < limits.transient && transientFits()) {
+          transientAttempts += 1;
+          await retryWait('not_established', transientAttempts, limits.transient, 500 * transientAttempts);
+          continue;
+        }
+        const attempts = preDispatch || transientAttempts > 0 ? { attempts: sends } : {};
         if (isToolsCall) {
-          if (cause && PRE_DISPATCH_CODES.has(cause) && transientAttempts < MAX_TRANSIENT_RETRIES) {
-            transientAttempts += 1;
-            await wait(500 * transientAttempts, signal);
-            continue;
-          }
           throw new HgiError('server_unreachable', err.message, {
             hint: 'The call may or may not have run. Check state before re-running.',
-            details: { ...err.details, outcome_unknown: true },
+            details: { ...err.details, outcome_unknown: true, ...attempts },
             cause: err.cause,
           });
         }
-        if (transientAttempts < MAX_TRANSIENT_RETRIES) {
-          transientAttempts += 1;
-          await wait(500 * transientAttempts, signal);
-          continue;
-        }
-        throw err;
+        // Every network failure of a non-call request is a not_established retry class: its retries ran out.
+        throw new HgiError(err.code, err.message, { hint: err.hint, details: { ...err.details, attempts: sends }, cause: err.cause });
       }
 
       const headerVersion = res.headers.get('x-mcp-version');
@@ -99,17 +159,18 @@ export function createTransportFetch(
       if (res.status === 429) {
         const header = parseRetryAfter(res.headers.get('retry-after'));
         await res.body?.cancel().catch(() => undefined);
-        const delaySec = header ?? Math.min(2 ** (rateAttempts + 1), 30) + random();
-        const remaining = RETRY_BUDGET_MS - (now() - started);
-        if (rateAttempts >= MAX_RATE_RETRIES || delaySec * 1000 > remaining) {
+        // Without --retries the backoff steps on the shared counter, so a load-shed retry moves it too (as before).
+        const used = limits.shared ? rateAttempts + shedAttempts : rateAttempts;
+        const delaySec = header ?? Math.min(2 ** (used + 1), 30) + random();
+        if (used >= limits.rate || delaySec * 1000 > remaining()) {
           throw new HgiError('rate_limited', 'The organization is being rate limited by the server.', {
             hint: 'Wait and retry; the limit is shared by every hgi process in your organization.',
-            details: { retry_after_seconds: header ?? Math.ceil(delaySec) },
+            details: { retry_after_seconds: header ?? Math.ceil(delaySec), attempts: sends },
           });
         }
         rateAttempts += 1;
         debug('429, waiting', delaySec);
-        await wait(delaySec * 1000 + random() * 250, signal);
+        await retryWait('rate_limited', used + 1, limits.rate, delaySec * 1000 + random() * 250);
         continue;
       }
 
@@ -125,15 +186,15 @@ export function createTransportFetch(
         const shed = await isShed(res);
         if (shed) {
           const header = parseRetryAfter(res.headers.get('retry-after')) ?? 1;
-          const remaining = RETRY_BUDGET_MS - (now() - started);
-          if (rateAttempts >= MAX_RATE_RETRIES || header * 1000 > remaining) {
+          const used = limits.shared ? rateAttempts + shedAttempts : shedAttempts;
+          if (used >= limits.shed || header * 1000 > remaining()) {
             throw new HgiError('server_unreachable', 'The server is shedding load (503).', {
               hint: 'Nothing was run; retrying is safe.',
-              details: { status: 503, outcome_unknown: false, retry_after_seconds: header },
+              details: { status: 503, outcome_unknown: false, retry_after_seconds: header, attempts: sends },
             });
           }
-          rateAttempts += 1;
-          await wait(header * 1000 + random() * 250, signal);
+          shedAttempts += 1;
+          await retryWait('load_shed', used + 1, limits.shed, header * 1000 + random() * 250);
           continue;
         }
         if (isToolsCall) {
@@ -142,14 +203,14 @@ export function createTransportFetch(
             details: { status: res.status, outcome_unknown: true },
           });
         }
-        if ([502, 503, 504].includes(res.status) && transientAttempts < MAX_TRANSIENT_RETRIES) {
+        if ([502, 503, 504].includes(res.status) && transientAttempts < limits.transient && transientFits()) {
           transientAttempts += 1;
-          await wait(500 * transientAttempts, signal);
+          await retryWait('not_established', transientAttempts, limits.transient, 500 * transientAttempts);
           continue;
         }
         throw new HgiError('server_unreachable', `The server returned HTTP ${res.status}.`, {
           hint: 'Retry in a moment.',
-          details: { status: res.status },
+          details: { status: res.status, ...([502, 503, 504].includes(res.status) ? { attempts: sends } : {}) },
         });
       }
 

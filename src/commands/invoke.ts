@@ -9,13 +9,16 @@ import { budgetId as ledgerBudgetId, ledgerPath, parseLabel, recordCall } from '
 import { checkBudget, recordSpend, resolveBudgetId, resolveMaxCredits } from '../budget.js';
 import { creditCostOf, interpretResult } from '../mcp/result.js';
 import { openSession } from '../mcp/session.js';
+import { retryLimits, type TransportRetryOptions } from '../mcp/transport-fetch.js';
 import { verbFor, type McpTool, type Verb } from '../mcp/tools.js';
 import { assertValidInput } from '../mcp/validate.js';
 import { buildContext } from './context.js';
 import { applySelect } from '../output/select.js';
 import { emit, preflightOutput } from './emit.js';
 import { preflightBatchFlags, readIds, runBatch } from './batch.js';
-import { readStdin, reportCredit } from './io.js';
+import { readStdin, reportCredit, reportRetry } from './io.js';
+import { resolveRetryOptions, type RetryOptions } from './retry-options.js';
+import { sendWithRetry } from './retry.js';
 
 interface InvokeOptions {
   input?: string;
@@ -31,6 +34,17 @@ interface InvokeOptions {
   ids?: string;
   idsColumn?: string;
   batchSize?: string;
+  retries?: string;
+  retryBudget?: string;
+}
+
+/** What the transport gets: only the options that were given, so without them nothing changes. */
+export function transportRetryOptions(r: RetryOptions): TransportRetryOptions {
+  return {
+    ...(r.retries !== null ? { retries: r.retries } : {}),
+    ...(r.retryBudgetMs !== null ? { retryBudgetMs: r.retryBudgetMs } : {}),
+    onRetry: reportRetry,
+  };
 }
 
 export function parseTimeoutMs(raw: string): number {
@@ -105,6 +119,10 @@ async function runInvoke(verb: Verb, toolName: string, opts: InvokeOptions, cmd:
   const input = await readInput(opts.input);
   preflightOutput({ format: opts.format, select: opts.select, out: opts.out, force: opts.force, allowForce: verb === 'run' });
   const timeoutMs = parseTimeoutMs(opts.timeout);
+  const retryOptions = resolveRetryOptions({ retries: opts.retries, retryBudget: opts.retryBudget });
+  const transportRetry = transportRetryOptions(retryOptions);
+  // `governance_unavailable` is re-sent on `hgi call` only, and only when retries are set.
+  const governance = { retries: verb === 'call' ? (retryOptions.retries ?? 0) : 0, budgetMs: retryLimits(transportRetry).budgetMs };
   const label = parseLabel(opts.label);
   const ledger = ledgerPath();
   const ids = opts.ids === undefined ? undefined : await readIds({ ...opts, ids: opts.ids }, input);
@@ -114,7 +132,7 @@ async function runInvoke(verb: Verb, toolName: string, opts: InvokeOptions, cmd:
   if (budgetId !== null && maxCredits !== null) await checkBudget(budgetId, maxCredits);
   const ctx = buildContext(cmd);
   const creds = ctx.tokens.loadCredentials();
-  const session = await openSession(ctx, { timeoutMs });
+  const session = await openSession(ctx, { timeoutMs, retry: transportRetry });
   // Recorded before interpreting (which throws on isError) and before any output, so an isError
   // result, a failed --out or a broken stdout still leaves the row. Never fails the call.
   const recordUsage = (result: CallToolResult): Promise<void> =>
@@ -157,34 +175,44 @@ async function runInvoke(verb: Verb, toolName: string, opts: InvokeOptions, cmd:
         validate: opts.validate,
         budget: budgetId !== null && maxCredits !== null ? { id: budgetId, max: maxCredits } : undefined,
         onResult: recordUsage,
+        governance,
       });
       return;
     }
     if (opts.validate) assertValidInput(tool, input);
 
-    const result = await session.callTool(toolName, input);
-    await recordUsage(result);
-    let budgetFailure: HgiError | null = null;
-    if (budgetId !== null && maxCredits !== null) {
-      try {
-        await recordSpend(budgetId, maxCredits, creditCostOf(result));
-      } catch (err) {
-        budgetFailure = toHgiError(err);
-      }
-    }
+    const capped = budgetId !== null && maxCredits !== null ? { id: budgetId, max: maxCredits } : null;
+    const { result, attempts, budgetFailure } = await sendWithRetry(session, toolName, input, {
+      ...governance,
+      // Every attempt that came back: one ledger row, and its spend under a run cap.
+      record: async (r) => {
+        await recordUsage(r);
+        if (!capped) return null;
+        try {
+          await recordSpend(capped.id, capped.max, creditCostOf(r));
+          return null;
+        } catch (err) {
+          return toHgiError(err);
+        }
+      },
+      beforeResend: capped ? async () => void (await checkBudget(capped.id, capped.max)) : undefined,
+      report: reportRetry,
+    });
     let outcome: ReturnType<typeof interpretResult>;
     try {
       outcome = interpretResult(result, toolName);
     } catch (err) {
       // A server refusal stays the error the caller acts on; a failed budget write is only flagged on it.
-      if (budgetFailure && err instanceof HgiError) {
-        throw new HgiError(err.code, err.message, { hint: err.hint, details: { ...err.details, budget_write_failed: true }, cause: err });
+      const retried = governance.retries > 0 && err instanceof HgiError && err.code === 'governance_unavailable';
+      if ((budgetFailure || retried) && err instanceof HgiError) {
+        const extra = { ...(budgetFailure ? { budget_write_failed: true } : {}), ...(retried ? { attempts } : {}) };
+        throw new HgiError(err.code, err.message, { hint: err.hint, details: { ...err.details, ...extra }, cause: err });
       }
       throw err;
     }
     const selected = applySelect(outcome.value, opts.select);
     const value = opts.meta
-      ? { result: selected, credit_cost: outcome.creditCost, mcp_version: session.state.mcpVersion }
+      ? { result: selected, credit_cost: outcome.creditCost, mcp_version: session.state.mcpVersion, attempts }
       : selected;
     if (budgetFailure) await failAfterBudgetWrite(budgetFailure, value, opts, outcome.creditCost);
     try {
@@ -229,9 +257,11 @@ export function registerInvokeCommands(program: Command): void {
       .option('--select <fields>', 'keep only these comma-separated fields (dotted paths allowed)')
       .option('--out <file>', 'write the result to a new file instead of stdout')
       .option('--force', verb === 'run' ? 'overwrite an existing --out file' : 'not available on call')
-      .option('--meta', 'print {result, credit_cost, mcp_version} instead of the bare result')
+      .option('--meta', 'print {result, credit_cost, mcp_version, attempts} instead of the bare result')
       .option('--label <label>', 'tag this call in the local credit ledger (see `hgi usage --by label`)')
-      .option('--timeout <seconds>', 'per-request timeout', '120')
+      .option('--timeout <seconds>', 'per-request timeout (each attempt; retry waits are extra)', '120')
+      .option('--retries <n>', 'retry rate limits and outages up to n times each, 0-20; 0 turns every retry off (also $HGI_RETRIES)')
+      .option('--retry-budget <seconds>', 'most seconds one request may spend waiting between retries, at most 3600 (also $HGI_RETRY_BUDGET; default 600 with retries, else 60)')
       .addOption(new Option('--no-validate', 'skip client-side schema validation (let the server judge the input)').hideHelp());
     if (verb === 'call') {
       cmd
@@ -251,6 +281,19 @@ export function registerInvokeCommands(program: Command): void {
           ].join('\n'),
         );
     }
+    cmd.addHelpText(
+      'after',
+      [
+        '',
+        'Retries (only failures before the tool runs; never a call that may have run):',
+        '  hgi retries a 429, the server shedding load (503) and a connection that was never established, and prints',
+        '  one line on stderr before each wait. --retries n allows n of each; --retry-budget caps the waiting per request.',
+        verb === 'call'
+          ? '  With --retries, `hgi call` also re-sends a governance_unavailable refusal (the server could not check the budget).'
+          : '  `hgi run` never re-sends governance_unavailable: it exits 7 with retryable: true and you decide.',
+        '  The flags win over HGI_RETRIES / HGI_RETRY_BUDGET.',
+      ].join('\n'),
+    );
     cmd.action((tool: string, opts: InvokeOptions, c: Command) => runInvoke(verb, tool, opts, c));
   }
 }

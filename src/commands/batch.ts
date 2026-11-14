@@ -15,7 +15,8 @@ import { applySelect } from '../output/select.js';
 import { writeStream } from '../output/stdout.js';
 import { redact } from '../redact.js';
 import { emitText } from './emit.js';
-import { readStdin, reportCredit } from './io.js';
+import { readStdin, reportCredit, reportRetry } from './io.js';
+import { sendWithRetry } from './retry.js';
 
 export interface BatchFlags {
   input?: string;
@@ -35,6 +36,8 @@ export interface BatchOptions {
   budget?: { id: string; max: number };
   /** Called with every result that came back (the credit ledger). Never throws. */
   onResult?: (result: CallToolResult) => Promise<void>;
+  /** `governance_unavailable` re-sends per batch call (0: none) and their wait budget. */
+  governance?: { retries: number; budgetMs: number };
 }
 
 interface RowError {
@@ -105,6 +108,8 @@ class Run {
   rowErrors = 0;
   cursor = 0;
   callsMade = 0;
+  /** `tools/call` re-sends across all batch calls (transport retries and governance re-sends). */
+  retries = 0;
   callsWithoutCost = 0;
   creditSum = 0;
   failedBatches = 0;
@@ -163,23 +168,35 @@ async function callBatch(
   input: Record<string, unknown>,
   batch: Batch,
   key: string,
-  opts: Pick<BatchOptions, 'budget' | 'onResult'>,
+  opts: Pick<BatchOptions, 'budget' | 'onResult' | 'governance'>,
 ): Promise<HgiError | null> {
   const { budget } = opts;
   run.callsMade += 1;
   let result: CallToolResult | undefined;
   let budgetFailure: HgiError | null = null;
+  const sendsBefore = session.state.toolsCallSends;
+  const governanceRetries = opts.governance?.retries ?? 0;
+  let attempts = 1;
   try {
-    result = await session.callTool(tool.name, argsFor(input, batch));
+    ({ result, budgetFailure, attempts } = await sendWithRetry(session, tool.name, argsFor(input, batch), {
+      retries: governanceRetries,
+      budgetMs: opts.governance?.budgetMs ?? 0,
+      // Every attempt that came back: one ledger row, and its spend under a run cap.
+      record: async (r) => {
+        await opts.onResult?.(r);
+        if (!budget) return null;
+        try {
+          await recordSpend(budget.id, budget.max, creditCostOf(r));
+          return null;
+        } catch (err) {
+          return toHgiError(err);
+        }
+      },
+      beforeResend: budget ? () => checkBatchBudget(budget, run) : undefined,
+      report: reportRetry,
+    }));
+    // Refused attempts are not billed: the batch call's cost is its last result's.
     run.addCost(result);
-    await opts.onResult?.(result);
-    if (budget) {
-      try {
-        await recordSpend(budget.id, budget.max, creditCostOf(result));
-      } catch (err) {
-        budgetFailure = toHgiError(err);
-      }
-    }
     const outcome = interpretResult(result, tool.name);
     const index = matchEntries(batch.kind, outcome.value, key);
     if (!index) {
@@ -195,10 +212,16 @@ async function callBatch(
     const err = toHgiError(raw);
     if (err.code !== 'tool_error' || err.details?.outcome_unknown === true) {
       // A server refusal stays the error the caller acts on; a failed budget write is only flagged on it.
-      if (budgetFailure) throw new HgiError(err.code, err.message, { hint: err.hint, details: { ...err.details, budget_write_failed: true }, cause: err });
+      const retried = governanceRetries > 0 && err.code === 'governance_unavailable';
+      if (budgetFailure || retried) {
+        const extra = { ...(budgetFailure ? { budget_write_failed: true } : {}), ...(retried ? { attempts } : {}) };
+        throw new HgiError(err.code, err.message, { hint: err.hint, details: { ...err.details, ...extra }, cause: err });
+      }
       throw err;
     }
     run.failBatch(batch, rowError(err.code, err.message));
+  } finally {
+    run.retries += Math.max(0, session.state.toolsCallSends - sendsBefore - 1);
   }
   return budgetFailure;
 }
@@ -222,6 +245,7 @@ function printMeta(run: Run): void {
   process.stderr.write(
     `${JSON.stringify({
       calls: run.callsMade,
+      retries: run.retries,
       rows: run.rows.length,
       row_errors: run.rowErrors,
       credit_cost: run.creditCost(),

@@ -152,10 +152,10 @@ Not null, but easy to misread:
 | 3 | the tool reported an error | read the message; do not blindly retry |
 | 4 | not signed in, or login expired | ask the user to run `hgi auth login` |
 | 4 `phoenix_account_required` | the signed-in identity has no Phoenix account | stop; tell the user to sign up, or to sign in with `hgi auth login` as an account that has one |
-| 5 | rate limited | wait `retry_after_seconds` from the error, then retry |
+| 5 | rate limited (after hgi's own retries) | wait `retry_after_seconds` from the error, then retry. For a long batch of lookups, pass `--retries 6` instead of writing your own retry loop |
 | 6 | out of credits: `credit_limit_exceeded` (the organization) or `user_credit_limit_exceeded` (the user's personal budget) | stop; tell the user which one, and to ask an admin. Retrying will not help |
 | 7 | server unreachable | retry later. If `outcome_unknown` is `true`, check state before re-running a `run` |
-| 7 `governance_unavailable` | the server could not check the budget; nothing ran (`retryable: true`) | wait a little, then retry once; hgi never retries it itself |
+| 7 `governance_unavailable` | the server could not check the budget; nothing ran (`retryable: true`) | wait a little, then retry once. `hgi call --retries <n>` retries it itself; `hgi run` never does |
 | 8 | OAuth or sign-in failure | ask the user to run `hgi auth login` again |
 | 9 | proxy or TLS problem | the error names the cause (see `NODE_EXTRA_CA_CERTS`, `HTTPS_PROXY`). After a `run`, check `outcome_unknown` before retrying |
 | 10 | wrong verb | use the verb the error names |
