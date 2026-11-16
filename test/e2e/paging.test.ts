@@ -581,6 +581,34 @@ describe('--ids with --all-pages', () => {
     ]);
   });
 
+  it('--retries: a follow-up that gets governance_unavailable once is re-sent; --meta counts the re-send', async () => {
+    const governance = {
+      isError: true,
+      content: [{ type: 'text' as const, text: 'Budget service down.' }],
+      _meta: { errorCode: 'governance_unavailable' },
+    };
+    let refused = false;
+    server.handlers.set(
+      TOOL,
+      batchHandler({
+        companies: { a1: 3, b2: 1 },
+        special: (args) => {
+          if (refused || args.offset !== 2) return undefined;
+          refused = true;
+          return governance;
+        },
+      }),
+    );
+    const res = await both(['a1', 'b2'], ['--retries', '1', '--meta']);
+    expect(res.code, res.stderr).toBe(0);
+    expect(sentArgs()).toEqual([{ hg_ids: ['a1', 'b2'] }, { hg_ids: ['a1'], offset: 2 }, { hg_ids: ['a1'], offset: 2 }]);
+    expect(rowsOf(res).map((r) => [r.input, ns(r.result?.installs)])).toEqual([
+      ['a1', range(3)],
+      ['b2', [0]],
+    ]);
+    expect(summary(res)).toMatchObject({ calls: 2, retries: 1, rows: 2, truncated_rows: 0 });
+  });
+
   it('Story 2 (run cap): the cap reached between follow-ups stops the run the same way; exit 13', async () => {
     server.handlers.set(TOOL, batchHandler({ companies: { a1: 5, b2: 5, c3: 5 } }));
     const res = await both(['a1', 'b2', 'c3'], ['--max-credits', '3'], { ...sb.env, HGI_BUDGET_ID: 'ids-pages' });
