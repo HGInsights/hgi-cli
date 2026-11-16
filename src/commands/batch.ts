@@ -350,7 +350,9 @@ async function runPagedBatches(d: Driver, pager: CompanyPager): Promise<void> {
   const batchOf = new Map<UniqueInput, number>();
   run.plan.batches.forEach((b, i) => b.items.forEach((u) => batchOf.set(u, i)));
   const sent = new Set<number>();
-  const pending = new Map<UniqueInput, Record<string, unknown>>();
+  // Every page-1 outcome, errors included, waits here until its company is reached, so a stop never prints a
+  // row for a company the run did not reach.
+  const pending = new Map<UniqueInput, Outcome>();
   const reached = new Set<UniqueInput>();
   for (const { unique: u } of run.plan.lines) {
     if (reached.has(u)) continue;
@@ -362,23 +364,29 @@ async function runPagedBatches(d: Driver, pager: CompanyPager): Promise<void> {
       const budgetFailure = await sendBatch(d, i);
       for (const item of batch.items) {
         const outcome = run.outcomes.get(item);
-        if (outcome && 'result' in outcome && isRecord(outcome.result)) {
-          run.outcomes.delete(item);
-          pending.set(item, outcome.result);
-        }
+        if (!outcome) continue;
+        run.outcomes.delete(item);
+        pending.set(item, outcome);
       }
       if (budgetFailure) {
-        // No follow-up once spend can't be recorded: every company not yet paged keeps page 1.
-        for (const [item, entry] of pending) run.outcomes.set(item, { result: pager.settle(entry, 'local_state_error') });
+        // No follow-up once spend can't be recorded: every company not yet paged keeps page 1, as `--ids` prints it.
+        for (const [item, outcome] of pending) {
+          run.outcomes.set(item, 'result' in outcome && isRecord(outcome.result) ? { result: pager.settle(outcome.result, 'local_state_error') } : outcome);
+        }
         await run.flush(opts.select);
         throw budgetWriteFailed(budgetFailure, 'batch call');
       }
-      await run.flush(opts.select);
     }
-    const entry = pending.get(u);
-    if (!entry) continue;
+    const outcome = pending.get(u);
+    if (!outcome) continue;
     pending.delete(u);
-    const { merged, failure } = await pager.page(entry, { field: batch.field, text: u.text, kind: u.kind, norm: u.norm });
+    if (!('result' in outcome) || !isRecord(outcome.result)) {
+      // A row error from page 1 (not_found, a failed batch): nothing to page.
+      run.outcomes.set(u, outcome);
+      await run.flush(opts.select);
+      continue;
+    }
+    const { merged, failure } = await pager.page(outcome.result, { field: batch.field, text: u.text, kind: u.kind, norm: u.norm });
     run.outcomes.set(u, { result: merged });
     await run.flush(opts.select);
     if (!failure) continue;

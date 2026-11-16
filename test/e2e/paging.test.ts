@@ -581,6 +581,48 @@ describe('--ids with --all-pages', () => {
     ]);
   });
 
+  it('Story 2 (fatal): a company page 1 left out gets no row when the run stops before reaching it', async () => {
+    server.handlers.set(
+      TOOL,
+      batchHandler({
+        companies: { a1: 5 },
+        special: (args, n) => {
+          if (n === 1) {
+            const a1 = { company_id: 'a1', installs: [{ n: 0 }, { n: 1 }], installs_count: 2, total_installs_count: 5, has_more: true };
+            return textResult({ companies: [a1] }, 1);
+          }
+          return args.offset === 2 ? CREDIT_LIMIT : undefined;
+        },
+      }),
+    );
+    const res = await both(['a1', 'b2']);
+    const error = expectError(res, 6, 'credit_limit_exceeded');
+    expect(error.details).toMatchObject({ partial_result: true, rows_emitted: 1, calls_made: 2 });
+    const rows = rowsOf(res);
+    expect(rows.map((r) => [r.input, r.result?.truncated_reason])).toEqual([['a1', 'credit_limit_exceeded']]);
+  });
+
+  it('Story 1: a company page 1 left out is a not_found row, printed in input order between paged rows', async () => {
+    server.handlers.set(
+      TOOL,
+      batchHandler({
+        companies: { a1: 3, c3: 3 },
+        special: (args, n) => {
+          if (n !== 1) return undefined;
+          const entry = (id: string) => ({ company_id: id, installs: [{ n: 0 }, { n: 1 }], installs_count: 2, total_installs_count: 3, has_more: true });
+          return textResult({ companies: [entry('a1'), entry('c3')] }, 1);
+        },
+      }),
+    );
+    const res = await both(['a1', 'b2', 'c3']);
+    expect(res.code, res.stderr).toBe(0);
+    expect(rowsOf(res).map((r) => [r.input, r.error?.code ?? ns(r.result?.installs)])).toEqual([
+      ['a1', range(3)],
+      ['b2', 'not_found'],
+      ['c3', range(3)],
+    ]);
+  });
+
   it('--retries: a follow-up that gets governance_unavailable once is re-sent; --meta counts the re-send', async () => {
     const governance = {
       isError: true,
