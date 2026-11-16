@@ -60,6 +60,33 @@ export const BATCH_TOOL: FakeTool = {
   annotations: { readOnlyHint: true },
 };
 
+/** `BATCH_TOOL` with `maxItems: 25` on both company fields, for `--ids` with `--all-pages`. */
+export const IDS_BATCH_TOOL: FakeTool = {
+  ...BATCH_TOOL,
+  inputSchema: {
+    ...BATCH_TOOL.inputSchema,
+    properties: {
+      ...(BATCH_TOOL.inputSchema.properties as Record<string, unknown>),
+      hg_ids: { type: 'array', items: { type: 'string' }, maxItems: 25 },
+      domains: { type: 'array', items: { type: 'string' }, maxItems: 25 },
+    },
+  },
+};
+
+/** Pageable entries under `results`, but `--ids` reads `companies`: the two arrays differ. */
+export const SPLIT_ARRAYS_TOOL: FakeTool = {
+  name: 'company_split',
+  inputSchema: { type: 'object', properties: { hg_ids: { type: 'array', items: { type: 'string' } }, offset: { type: 'integer' } } },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      companies: { type: 'array', items: { type: 'object', properties: { company_id: { type: 'string' } } } },
+      results: (BATCH_TOOL.outputSchema as { properties: Record<string, unknown> }).properties.companies,
+    },
+  },
+  annotations: { readOnlyHint: true },
+};
+
 /** Offset, but no rows array per company (a spend-style tool). */
 export const SPEND_LIKE_TOOL: FakeTool = {
   name: 'company_outlay',
@@ -121,8 +148,10 @@ export function topHandler(opts: TopOptions): (args: Record<string, unknown>) =>
 }
 
 export interface BatchOptions {
-  /** Rows per company, keyed by the id as the caller sends it. */
+  /** Rows per company, keyed by the id or domain as the caller sends it. */
   companies: Record<string, number>;
+  /** Calls (1-based) or requests answered specially instead; return undefined to answer normally. */
+  special?: (args: Record<string, unknown>, call: number) => ToolResult | undefined;
   /** Answer with ids lowercased and leading zeros dropped. */
   dropLeadingZeros?: boolean;
   /** Extra entries on page 1 (e.g. one matching no input). */
@@ -134,23 +163,30 @@ export interface BatchOptions {
 
 /** Answers `company_widgets`: one entry per requested id, installs sliced by `offset` and `max_results`. */
 export function batchHandler(opts: BatchOptions): (args: Record<string, unknown>) => Promise<ToolResult> {
+  let call = 0;
   return async (args) => {
+    call += 1;
     if (opts.delayMs) await new Promise((r) => setTimeout(r, opts.delayMs));
+    const special = opts.special?.(args, call);
+    if (special) return special;
     const offset = typeof args.offset === 'number' ? args.offset : 0;
     const size = typeof args.max_results === 'number' ? args.max_results : 2;
-    const ids = Array.isArray(args.hg_ids) ? (args.hg_ids as string[]) : opts.fallback ? [opts.fallback] : [];
-    const companies = ids.map((id) => {
-      const total = opts.companies[id] ?? 0;
+    const ids = Array.isArray(args.hg_ids) ? (args.hg_ids as string[]) : Array.isArray(args.domains) ? [] : opts.fallback ? [opts.fallback] : [];
+    const domains = Array.isArray(args.domains) ? (args.domains as string[]) : [];
+    const entry = (total: number) => {
       const count = Math.max(0, Math.min(size, total - offset));
       return {
-        company_id: opts.dropLeadingZeros ? normalizeId(id) : id,
         installs: rows(offset, count),
         installs_count: count,
         total_installs_count: total,
         // Wrong on purpose at exact page boundaries, like the live server.
         has_more: offset + count <= total,
       };
-    });
+    };
+    const companies = [
+      ...ids.map((id) => ({ company_id: opts.dropLeadingZeros ? normalizeId(id) : id, ...entry(opts.companies[id] ?? 0) })),
+      ...domains.map((d) => ({ company_domain: d, ...entry(opts.companies[d] ?? 0) })),
+    ];
     return textResult({ companies: [...companies, ...(offset === 0 ? (opts.extra ?? []) : [])] }, 1);
   };
 }

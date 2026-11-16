@@ -8,8 +8,10 @@ import {
   BATCH_TOOL,
   CREDIT_LIMIT,
   HAS_MORE_TOOL,
+  IDS_BATCH_TOOL,
   PAGE_NUMBER_TOOL,
   SPEND_LIKE_TOOL,
+  SPLIT_ARRAYS_TOOL,
   TOP_TOOL,
   batchHandler,
   topHandler,
@@ -384,11 +386,15 @@ describe('Story 4: refused up front, nothing sent', () => {
     expect(server.toolCalls()).toEqual([]);
   });
 
-  it('--all-pages with --ids is refused', async () => {
+  it.each([
+    ['no rows array per company', SPEND_LIKE_TOOL],
+    ['pageable entries in another array than the one --ids reads', SPLIT_ARRAYS_TOOL],
+  ])('--ids with --all-pages: %s is not_pageable, nothing sent', async (_name, tool) => {
+    server.tools.push(SPLIT_ARRAYS_TOOL);
     const ids = path.join(sb.dir, 'ids.txt');
     fs.writeFileSync(ids, 'a1\nb2\n');
-    const error = expectError(await runCli(['call', 'company_widgets', '--all-pages', '--ids', `@${ids}`], sb.env), 2, 'invalid_input');
-    expect(error.details?.reason).toBe('all_pages_with_ids');
+    const error = expectError(await runCli(['call', tool.name, '--all-pages', '--ids', `@${ids}`], sb.env), 2, 'invalid_input');
+    expect(error.details).toMatchObject({ reason: 'not_pageable', tool: tool.name });
     expect(server.toolCalls()).toEqual([]);
   });
 });
@@ -428,5 +434,197 @@ describe('issue #32: --retries with --all-pages', () => {
     const res = await call('list_widgets', {}, ['--all-pages']);
     expectError(res, 7, 'governance_unavailable');
     expect(server.toolCalls()).toHaveLength(2);
+  });
+});
+
+describe('--ids with --all-pages', () => {
+  const TOOL = IDS_BATCH_TOOL.name;
+  type Row = { input: string; result?: Record<string, unknown>; error?: { code: string } };
+
+  beforeEach(() => {
+    server.tools = server.tools.filter((t) => t.name !== TOOL).concat(IDS_BATCH_TOOL);
+  });
+
+  const idsFile = (lines: string[]) => {
+    const file = path.join(sb.dir, 'ids.txt');
+    fs.writeFileSync(file, `${lines.join('\n')}\n`);
+    return file;
+  };
+  const both = (lines: string[], args: string[] = [], env = sb.env) =>
+    runCli(['call', TOOL, '--ids', `@${idsFile(lines)}`, '--all-pages', ...args], env);
+  const rowsOf = (res: CliResult): Row[] =>
+    res.stdout
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Row);
+  const summary = (res: CliResult) => {
+    const line = res.stderr.split('\n').find((l) => l.startsWith('{"calls"'));
+    return line === undefined ? undefined : (JSON.parse(line) as Record<string, unknown>);
+  };
+  const toolError = { content: [{ type: 'text' as const, text: 'Upstream lookup failed.' }], isError: true };
+  /** Company i: 1 row (a short page), 2 rows (exactly one page, has_more true, total reached) or 5 rows (3 pages). */
+  const counts = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`co${i}`, [1, 2, 5][i % 3] as number]));
+  const names = (n: number) => Array.from({ length: n }, (_, i) => `co${i}`);
+  const followUps = (from: number, to: number) =>
+    names(to)
+      .slice(from)
+      .filter((_, k) => (from + k) % 3 === 2)
+      .flatMap((id) => [
+        { hg_ids: [id], offset: 2 },
+        { hg_ids: [id], offset: 4 },
+      ]);
+
+  it('Story 1: 30 ids send 2 batches, follow-ups only for unfinished companies, one per call; 30 rows in input order', async () => {
+    server.handlers.set(TOOL, batchHandler({ companies: counts(30) }));
+    const res = await both(names(30));
+    expect(res.code, res.stderr).toBe(0);
+    expect(sentArgs()).toEqual([{ hg_ids: names(25) }, ...followUps(0, 25), { hg_ids: names(30).slice(25) }, ...followUps(25, 30)]);
+    const rows = rowsOf(res);
+    expect(rows.map((r) => r.input)).toEqual(names(30));
+    rows.forEach((r, i) => {
+      const n = [1, 2, 5][i % 3] as number;
+      expect(ns(r.result?.installs)).toEqual(range(n));
+      expect(r.result).toMatchObject({ company_id: `co${i}`, pages_fetched: n === 5 ? 3 : 1 });
+      expect(r.result?.truncated).toBeUndefined();
+    });
+    expect(server.maxInFlight).toBe(1);
+  });
+
+  it('Story 1 (stop rule): exactly page-size rows with has_more true and the total reached gets no follow-up', async () => {
+    server.handlers.set(TOOL, batchHandler({ companies: { exact: 2, long: 3 } }));
+    const res = await both(['exact', 'long']);
+    expect(res.code, res.stderr).toBe(0);
+    expect(sentArgs()).toEqual([{ hg_ids: ['exact', 'long'] }, { hg_ids: ['long'], offset: 2 }]);
+    expect(rowsOf(res)[0]?.result).toMatchObject({ has_more: true, total_installs_count: 2, pages_fetched: 1 });
+  });
+
+  it('Story 1 (max pages, credits): --max-pages per company marks truncated rows; one summed credit line; --meta counts follow-ups and truncated rows', async () => {
+    server.handlers.set(TOOL, batchHandler({ companies: { a1: 10, b2: 1, c3: 4, d4: 10 } }));
+    const res = await both(['a1', 'b2', 'c3', 'd4', 'a1'], ['--max-pages', '2', '--meta']);
+    expect(res.code, res.stderr).toBe(0);
+    const rows = rowsOf(res);
+    expect(rows.map((r) => [r.input, ns(r.result?.installs), r.result?.pages_fetched, r.result?.truncated_reason])).toEqual([
+      ['a1', range(4), 2, 'max_pages'],
+      ['b2', [0], 1, undefined],
+      ['c3', range(4), 2, undefined],
+      ['d4', range(4), 2, 'max_pages'],
+      ['a1', range(4), 2, 'max_pages'],
+    ]);
+    expect(rows[0]?.result?.truncated).toBe(true);
+    // 1 batch + 1 follow-up each for a1, c3 and d4; the repeated a1 is not fetched again.
+    expect(server.toolCalls()).toHaveLength(4);
+    expect(res.stderr.split('\n').filter((l) => l.startsWith('{"credit_cost"'))).toEqual(['{"credit_cost":4}']);
+    expect(summary(res)).toEqual({ calls: 4, rows: 5, row_errors: 0, truncated_rows: 3, credit_cost: 4, calls_without_cost: 0 });
+  });
+
+  it('Story 2 (tool error): a tool error on one company page 2 truncates only that row; the rest complete; exit 3', async () => {
+    server.handlers.set(
+      TOOL,
+      batchHandler({
+        companies: { a1: 5, b2: 5, c3: 5 },
+        special: (args) => ((args.hg_ids as string[])[0] === 'b2' && args.offset === 2 ? toolError : undefined),
+      }),
+    );
+    const res = await both(['a1', 'b2', 'c3']);
+    const error = expectError(res, 3, 'tool_error');
+    expect(error.details).toMatchObject({ failed_batches: 0, paging_failures: 1, rows_emitted: 3, calls_made: 6 });
+    const rows = rowsOf(res);
+    expect(rows.map((r) => [r.input, ns(r.result?.installs), r.result?.truncated_reason])).toEqual([
+      ['a1', range(5), undefined],
+      ['b2', [0, 1], 'tool_error'],
+      ['c3', range(5), undefined],
+    ]);
+    expect(rows[1]?.result).toMatchObject({ truncated: true, pages_fetched: 1 });
+  });
+
+  it('Story 2 (fatal): a credit limit on a follow-up stops the run; earlier rows and the paging row print; exit 6', async () => {
+    server.handlers.set(
+      TOOL,
+      batchHandler({
+        companies: counts(6),
+        special: (args) => ((args.hg_ids as string[])[0] === 'co2' && args.offset === 2 ? CREDIT_LIMIT : undefined),
+      }),
+    );
+    const res = await both(names(6));
+    const error = expectError(res, 6, 'credit_limit_exceeded');
+    expect(error.details).toMatchObject({ partial_result: true, rows_emitted: 3, calls_made: 2 });
+    expect(server.toolCalls()).toHaveLength(2);
+    const rows = rowsOf(res);
+    expect(rows.map((r) => r.input)).toEqual(['co0', 'co1', 'co2']);
+    expect(rows[2]?.result).toMatchObject({ truncated: true, truncated_reason: 'credit_limit_exceeded', pages_fetched: 1 });
+    expect(ns(rows[2]?.result?.installs)).toEqual([0, 1]);
+  });
+
+  it('Story 2 (fatal, mixed file): batches go out in input order, so the paging row prints even after a domain line', async () => {
+    server.handlers.set(
+      TOOL,
+      batchHandler({
+        companies: { 'a.com': 3, co1: 3, 'b.com': 3 },
+        special: (args) => (Array.isArray(args.domains) && args.domains[0] === 'b.com' && args.offset === 2 ? CREDIT_LIMIT : undefined),
+      }),
+    );
+    const res = await both(['a.com', 'co1', 'b.com']);
+    const error = expectError(res, 6, 'credit_limit_exceeded');
+    expect(sentArgs()).toEqual([
+      { domains: ['a.com', 'b.com'] },
+      { domains: ['a.com'], offset: 2 },
+      { hg_ids: ['co1'] },
+      { hg_ids: ['co1'], offset: 2 },
+      { domains: ['b.com'], offset: 2 },
+    ]);
+    expect(error.details).toMatchObject({ partial_result: true, rows_emitted: 3, calls_made: 5 });
+    const rows = rowsOf(res);
+    expect(rows.map((r) => [r.input, ns(r.result?.installs), r.result?.truncated_reason])).toEqual([
+      ['a.com', range(3), undefined],
+      ['co1', range(3), undefined],
+      ['b.com', [0, 1], 'credit_limit_exceeded'],
+    ]);
+  });
+
+  it('Story 2 (run cap): the cap reached between follow-ups stops the run the same way; exit 13', async () => {
+    server.handlers.set(TOOL, batchHandler({ companies: { a1: 5, b2: 5, c3: 5 } }));
+    const res = await both(['a1', 'b2', 'c3'], ['--max-credits', '3'], { ...sb.env, HGI_BUDGET_ID: 'ids-pages' });
+    const error = expectError(res, 13, 'budget_exceeded');
+    expect(error.details).toMatchObject({ partial_result: true, rows_emitted: 2, calls_made: 3, spent: 3, max: 3 });
+    expect(error.hint).toMatch(/nothing more was sent/);
+    expect(server.toolCalls()).toHaveLength(3);
+    const rows = rowsOf(res);
+    expect(rows.map((r) => [r.input, ns(r.result?.installs), r.result?.truncated_reason])).toEqual([
+      ['a1', range(5), undefined],
+      ['b2', [0, 1], 'budget_exceeded'],
+    ]);
+  });
+
+  describe.skipIf(process.getuid?.() === 0)('when the run cap cannot record the batch call', () => {
+    const budgets = () => path.join(sb.configDir, 'budgets');
+    afterEach(() => {
+      try {
+        fs.chmodSync(budgets(), 0o700);
+      } catch {
+        // never created
+      }
+    });
+
+    it('sends no follow-up: page-1 rows, unfinished ones truncated, exit 12 tool_ran with partial_result', async () => {
+      server.handlers.set(
+        TOOL,
+        batchHandler({
+          companies: { a1: 5, b2: 1 },
+          special: () => {
+            fs.chmodSync(budgets(), 0o500);
+            return undefined;
+          },
+        }),
+      );
+      const res = await both(['a1', 'b2'], ['--max-credits', '50'], { ...sb.env, HGI_BUDGET_ID: 'ids-write' });
+      const error = expectError(res, 12, 'local_state_error');
+      expect(error.details).toMatchObject({ kind: 'budget_write_failed', tool_ran: true, partial_result: true, rows_emitted: 2, calls_made: 1 });
+      expect(server.toolCalls()).toHaveLength(1);
+      const rows = rowsOf(res);
+      expect(rows.map((r) => [r.input, ns(r.result?.installs), r.result?.pages_fetched, r.result?.truncated_reason])).toEqual([
+        ['a1', [0, 1], 1, 'local_state_error'],
+        ['b2', [0], 1, undefined],
+      ]);
+    });
   });
 });
