@@ -165,6 +165,7 @@ async function runPaged(ctx: PagingContext, verb: Verb, opts: InvokeOptions, mcp
         credit_cost: paged.creditCost,
         mcp_version: mcpVersion(),
         pages_fetched: paged.callsMade,
+        retries: paged.retries,
         calls_without_cost: paged.callsWithoutCost,
       }
     : selected;
@@ -279,6 +280,7 @@ async function runInvoke(verb: Verb, toolName: string, opts: InvokeOptions, cmd:
           validate: opts.validate,
           budget: budgetId !== null && maxCredits !== null ? { id: budgetId, max: maxCredits } : undefined,
           onResult: recordUsage,
+          governance,
         },
         verb,
         opts,
@@ -342,7 +344,7 @@ export function registerInvokeCommands(program: Command): void {
       .option('--select <fields>', 'keep only these comma-separated fields (dotted paths allowed)')
       .option('--out <file>', 'write the result to a new file instead of stdout')
       .option('--force', verb === 'run' ? 'overwrite an existing --out file' : 'not available on call')
-      .option('--meta', 'print {result, credit_cost, mcp_version, attempts} instead of the bare result')
+      .option('--meta', `print {result, credit_cost, mcp_version, attempts} instead of the bare result${verb === 'call' ? ' (with --all-pages: pages_fetched and retries instead of attempts)' : ''}`)
       .option('--label <label>', 'tag this call in the local credit ledger (see `hgi usage --by label`)')
       .option('--timeout <seconds>', 'per-request timeout (each attempt; retry waits are extra)', '120')
       .option('--retries <n>', 'retry rate limits and outages up to n times each, 0-20; 0 turns every retry off (also $HGI_RETRIES)')

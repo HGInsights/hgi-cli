@@ -104,11 +104,13 @@ Anything else is refused before anything is sent (exit 2, `details.reason: "not_
 - `pages_fetched`: the pages that contributed to it;
 - `truncated: true` and `truncated_reason` when it did not finish: `max_pages`, `unmatched`, or the `error.code` of the later page that failed (see [exit codes](exit-codes.md#partial-output-from---all-pages)).
 
-`--select`, `-f` and `--out` apply to the merged result, also when a later page failed and a partial result is printed. The credit line on stderr is printed once, with the sum of the reported costs (`null`/`unknown` when no page reported one). With `--meta` the envelope adds `pages_fetched` (the `tools/call` requests sent) and `calls_without_cost` (calls that reported no cost, so `credit_cost`, the sum, is a lower bound):
+`--select`, `-f` and `--out` apply to the merged result, also when a later page failed and a partial result is printed. The credit line on stderr is printed once, with the sum of the reported costs (`null`/`unknown` when no page reported one). With `--meta` the envelope adds `pages_fetched` (the pages requested, the failed one included: one per page however many times it was sent), `retries` (the re-sends across all pages, replacing a single call's `attempts`) and `calls_without_cost` (pages that reported no cost, so `credit_cost`, the sum, is a lower bound; a re-sent page counts its last attempt's cost):
 
 ```json
-{"result": {...}, "credit_cost": 6, "mcp_version": "v2", "pages_fetched": 3, "calls_without_cost": 0}
+{"result": {...}, "credit_cost": 6, "mcp_version": "v2", "pages_fetched": 3, "retries": 0, "calls_without_cost": 0}
 ```
+
+With `--retries`, each page gets the same retries as a single `hgi call`, `governance_unavailable` re-sends included; a page whose retries run out stops paging like any later-page failure, with `details.attempts`.
 
 Without `--all-pages`, `--meta` is unchanged. `--all-pages` is not available with `--ids` or on `hgi run`.
 

@@ -58,7 +58,7 @@ For every row of an offset-paged tool, use `hgi call <tool> --all-pages` instead
 - **Each extra page is a separate, billed call.** For batch tools (`hg_ids`/`domains`), follow-ups go one call per unfinished company.
 - It stops on `has_more: false`, an empty or short page, or the total reached, never on `has_more: true` alone (the server can say `true` after the last row). `--max-pages <n>` caps pages per page object (default 10, page 1 included).
 - The result keeps the server's shape. Each page object (the result, or each `companies[]` entry) gets `pages_fetched`; one cut short says `truncated: true` and `truncated_reason`: `max_pages`, `unmatched` (a batch entry hgi could not tie to one input, so it never guesses) or the code of the call that failed. Report truncated parts as incomplete.
-- One credit line at the end with the sum. `--meta` adds `pages_fetched` (calls sent) and `calls_without_cost`.
+- One credit line at the end with the sum. `--meta` adds `pages_fetched` (pages requested), `retries` (re-sends) and `calls_without_cost`.
 - Not with `--ids` (exit 2 `all_pages_with_ids`): page one company list at a time.
 
 ## Recipes

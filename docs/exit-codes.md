@@ -43,7 +43,7 @@ When stderr is not a terminal (or you pass `--json-errors`), errors are one JSON
   - `retryable` on `governance_unavailable`: nothing ran, and retrying later is safe
   - `budget_write_failed: true` on a server refusal (exit 3, 4, 6, 7 or 11) whose spend could not be recorded under a run cap; the refusal is still the error to act on
   - `spent`, `max` and `budget_id` on `budget_exceeded`
-  - `partial_result: true` and `pages_fetched` (the `tools/call` requests sent, the failed one included) when `--all-pages` stopped after page 1; `out_write_failed: true` when the partial result could not be written to `--out` and went to stdout instead
+  - `partial_result: true` and `pages_fetched` (the pages requested, the failed one included; a re-sent page counts once) when `--all-pages` stopped after page 1; `out_write_failed: true` when the partial result could not be written to `--out` and went to stdout instead
   - `kind` on `local_state_error`: `credentials_corrupt`, `credentials_unsafe`, `lock_timeout`, `lock_compromised`, `write_failed`, `budget_corrupt`, `budget_write_failed`, `ledger_unsafe` or `read_failed`; with `tool_ran` when the tool already ran
 
 On a terminal, errors are plain text with a hint.
@@ -79,7 +79,7 @@ Exit 2 refusals specific to `--ids`, each before anything is sent (`details.reas
 
 - **0**: paging finished. Parts that stopped at `--max-pages` or could not be tied to one input are marked `truncated: true` (`truncated_reason` `max_pages` or `unmatched`); that is not an error.
 - **A failure on page 1** is exactly the failure of `hgi call` without `--all-pages`: nothing on stdout.
-- **A failure on any later page** (tool error, out of credits, rate limited after retries, unreachable, the run cap, a follow-up that fails the input schema, any code) stops all paging; nothing is retried. The merged result of the pages so far is written where a full result would go (stdout, or `--out`; if `--out` fails it goes to stdout and `details.out_write_failed` is `true`), with every part that did not finish marked `truncated: true, truncated_reason: "<error.code>"`. `hgi` then exits with the failing call's own code, and `details` adds `partial_result: true` and `pages_fetched`. Keep what was printed: it was billed.
+- **A failure on any later page** (tool error, out of credits, rate limited or `governance_unavailable` after its retries, unreachable, the run cap, a follow-up that fails the input schema, any code) stops all paging; nothing is retried. The merged result of the pages so far is written where a full result would go (stdout, or `--out`; if `--out` fails it goes to stdout and `details.out_write_failed` is `true`), with every part that did not finish marked `truncated: true, truncated_reason: "<error.code>"`. `hgi` then exits with the failing call's own code, and `details` adds `partial_result: true` and `pages_fetched`. Keep what was printed: it was billed.
 - A later page that is not an object, or has no rows array where the schema says one is, is exit 3 `tool_error` with `details.reason: "unexpected_response"`, handled as above.
 - **12 `budget_write_failed` with `details.tool_ran: true`**: a page ran but its spend could not be recorded under a run cap. On page 1 this is exactly the single-call case (page 1 on stdout, no paging fields). On a later page, paging stops and the merged result so far is on stdout (even with `--out`), with `partial_result` and `pages_fetched`. Do not re-run it.
 
