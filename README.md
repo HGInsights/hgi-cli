@@ -75,6 +75,7 @@ hgi auth login --no-browser          # prints a URL; open it anywhere, then past
 | `hgi tools list [--refresh] [--json]` | the tools the server offers you, with `call`/`run`, required fields, schemas and the MCP version |
 | `hgi call <tool> --input '<json>'` | run a read-only tool |
 | `hgi call <tool> --ids @file` | run a read-only batch tool over a list of HG ids or domains, one row per line |
+| `hgi call <tool> --all-pages` | fetch every page of an offset-paged tool and print one merged result; each extra page is a separate, billed call ([details](docs/output-formats.md#hgi-call---all-pages)) |
 | `hgi run <tool> --input '<json>'` | run a state-changing tool |
 | `hgi usage [--since <when>] [--by tool\|label\|day\|call]` | what `hgi` spent on this machine, from the local credit ledger (no sign-in needed) |
 | `hgi budget status` / `hgi budget reset` | what this run has spent against `hgi call --max-credits`, and starting the count over (local only) |

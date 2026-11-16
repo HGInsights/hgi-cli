@@ -62,6 +62,40 @@ With `--ids`, `hgi call` prints **one row per input line, in input order**, inst
 - The credit line on stderr is printed once, with the total, at the end (and before a fatal error).
 - On a terminal, progress (`hgi: batch 3/40`) goes to stderr. It is never printed when stderr is not a terminal.
 
+## `hgi call --all-pages`
+
+`--all-pages` fetches every page of an offset-paged tool, one call at a time, and prints **one merged result in the server's shape**, as if the server had returned every row at once. `--max-pages <n>` caps the pages per page object (default 10, page 1 included). **Each extra page is a separate, billed call.**
+
+Which tools can be paged is read from the tool's schemas, never its name:
+
+- the input schema has an `offset` property of type `integer`;
+- the output has **page objects**: the result itself if it qualifies, otherwise each item of its one top-level array whose items qualify (`companies[]` on batch tools). A page object has exactly one array-of-objects property (its rows), plus `has_more` or `hasMore`, a total, or both;
+- the **total** is a numeric `total`, `total_count` or `totalCount`; otherwise the one numeric `total_*` property whose `_`-separated name has the rows property's name as a whole segment (`installs` → `total_installs_count`). None, or more than one, means no total. `count` is never a total;
+- the **page size** is the `limit` or `max_results` value in `--input`, else that property's schema `default`, else unknown. A tool declaring both has no known page size.
+
+Anything else is refused before anything is sent (exit 2, `details.reason: "not_pageable"`).
+
+**Stop rule**, per page object, after each page: stop when `has_more`/`hasMore` is `false`, the page has no rows, the page has fewer rows than a known page size, the rows so far reach the total, or `--max-pages` pages were fetched for it. `has_more: true` alone never keeps paging past a short page, an empty page or the total. Otherwise the next page is the original input plus `offset` = rows so far.
+
+**Batch tools.** Page 1 is the call as given. Follow-ups go only for companies that are not finished, because `offset` applies to every company in a call:
+
+- with two or more values across `hg_ids` and `domains`, one call per company: the original input with `hg_ids`/`domains` replaced by that company's value as you wrote it (`{"hg_ids": ["<id>"], "offset": n}`), other filters kept. Entries are matched like `--ids` rows: `company_id`, else `requested_hg_id`, else `organization_id` for ids (lowercased, leading zeros removed), `company_domain` for domains (lowercased, no scheme, `www.` or path);
+- otherwise, when page 1 returned exactly one entry (the company the input named, if it named one), the original input plus `offset`; every follow-up must again return exactly that one company;
+- an entry that can't be tied to exactly one input, a page 1 with several entries and nothing to split on, or a follow-up that doesn't return exactly that one company, is not followed up and is marked `unmatched`. hgi never guesses which company a page belongs to.
+
+**The merged result.** Rows are appended to each page object's rows array. Its other fields (`has_more`, counts) are those of the last page fetched for it; for batch tools the top level is page 1's. Each page object gains:
+
+- `pages_fetched`: the pages that contributed to it;
+- `truncated: true` and `truncated_reason` when it did not finish: `max_pages`, `unmatched`, or the `error.code` of the later page that failed (see [exit codes](exit-codes.md#partial-output-from---all-pages)).
+
+`--select`, `-f` and `--out` apply to the merged result, also when a later page failed and a partial result is printed. The credit line on stderr is printed once, with the sum of the reported costs (`null`/`unknown` when no page reported one). With `--meta` the envelope adds `pages_fetched` (the `tools/call` requests sent) and `calls_without_cost` (calls that reported no cost, so `credit_cost`, the sum, is a lower bound):
+
+```json
+{"result": {...}, "credit_cost": 6, "mcp_version": "v2", "pages_fetched": 3, "calls_without_cost": 0}
+```
+
+Without `--all-pages`, `--meta` is unchanged. `--all-pages` is not available with `--ids` or on `hgi run`.
+
 ## `hgi tools list`
 
 `hgi tools list --json` prints `{base_url, mcp_version, server, fetched_at, from_cache, count, tools: [...]}`. Each tool has `name`, `verb` (`call` or `run`), `read_only` (`true`, `false` or `null` when the server gave no annotation), `description`, `required`, `parameters` and the full `input_schema`. The list is cached for 15 minutes per server, organization and user; `--refresh` asks the server. The served MCP version comes from the server (`X-MCP-Version`).
