@@ -514,7 +514,7 @@ describe('--ids with --all-pages', () => {
     // 1 batch + 1 follow-up each for a1, c3 and d4; the repeated a1 is not fetched again.
     expect(server.toolCalls()).toHaveLength(4);
     expect(res.stderr.split('\n').filter((l) => l.startsWith('{"credit_cost"'))).toEqual(['{"credit_cost":4}']);
-    expect(summary(res)).toEqual({ calls: 4, rows: 5, row_errors: 0, truncated_rows: 3, credit_cost: 4, calls_without_cost: 0 });
+    expect(summary(res)).toEqual({ calls: 4, retries: 0, rows: 5, row_errors: 0, truncated_rows: 3, credit_cost: 4, calls_without_cost: 0 });
   });
 
   it('Story 2 (tool error): a tool error on one company page 2 truncates only that row; the rest complete; exit 3', async () => {
