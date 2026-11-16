@@ -58,7 +58,7 @@ For every row of an offset-paged tool, use `hgi call <tool> --all-pages` instead
 - **Each extra page is a separate, billed call.** For batch tools (`hg_ids`/`domains`), follow-ups go one call per unfinished company.
 - It stops on `has_more: false`, an empty or short page, or the total reached, never on `has_more: true` alone (the server can say `true` after the last row). `--max-pages <n>` caps pages per page object (default 10, page 1 included).
 - The result keeps the server's shape. Each page object (the result, or each `companies[]` entry) gets `pages_fetched`; one cut short says `truncated: true` and `truncated_reason`: `max_pages`, `unmatched` (a batch entry hgi could not tie to one input, so it never guesses) or the code of the call that failed. Report truncated parts as incomplete.
-- One credit line at the end with the sum. `--meta` adds `pages_fetched` (calls sent) and `calls_without_cost`.
+- One credit line at the end with the sum. `--meta` adds `pages_fetched` (pages requested), `retries` (re-sends) and `calls_without_cost`.
 - Not with `--ids` (exit 2 `all_pages_with_ids`): page one company list at a time.
 
 ## Recipes
@@ -155,10 +155,10 @@ Not null, but easy to misread:
 | 3 | the tool reported an error | read the message; do not blindly retry |
 | 4 | not signed in, or login expired | ask the user to run `hgi auth login` |
 | 4 `phoenix_account_required` | the signed-in identity has no Phoenix account | stop; tell the user to sign up, or to sign in with `hgi auth login` as an account that has one |
-| 5 | rate limited | wait `retry_after_seconds` from the error, then retry |
+| 5 | rate limited (after hgi's own retries) | wait `retry_after_seconds` from the error, then retry. For a long batch of lookups, pass `--retries 6` instead of writing your own retry loop |
 | 6 | out of credits: `credit_limit_exceeded` (the organization) or `user_credit_limit_exceeded` (the user's personal budget) | stop; tell the user which one, and to ask an admin. Retrying will not help |
 | 7 | server unreachable | retry later. If `outcome_unknown` is `true`, check state before re-running a `run` |
-| 7 `governance_unavailable` | the server could not check the budget; nothing ran (`retryable: true`) | wait a little, then retry once; hgi never retries it itself |
+| 7 `governance_unavailable` | the server could not check the budget; nothing ran (`retryable: true`) | wait a little, then retry once. `hgi call --retries <n>` retries it itself; `hgi run` never does |
 | 8 | OAuth or sign-in failure | ask the user to run `hgi auth login` again |
 | 9 | proxy or TLS problem | the error names the cause (see `NODE_EXTRA_CA_CERTS`, `HTTPS_PROXY`). After a `run`, check `outcome_unknown` before retrying |
 | 10 | wrong verb | use the verb the error names |

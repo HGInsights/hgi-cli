@@ -9,6 +9,8 @@ import { isRecord } from '../mcp/schema-shape.js';
 import type { McpSession } from '../mcp/session.js';
 import type { McpTool } from '../mcp/tools.js';
 import { assertValidInput } from '../mcp/validate.js';
+import { reportRetry } from './io.js';
+import { sendWithRetry, type SendOutcome } from './retry.js';
 
 /** `--max-pages` when it is not given: counts page 1, per page object. */
 export const DEFAULT_MAX_PAGES = 10;
@@ -62,13 +64,17 @@ export interface PagingContext {
   budget?: { id: string; max: number };
   /** Called with every result that came back (the credit ledger). Never throws. */
   onResult?: (result: CallToolResult) => Promise<void>;
+  /** `governance_unavailable` re-sends per page (0: none) and their wait budget. */
+  governance?: { retries: number; budgetMs: number };
 }
 
 export interface PagedOutcome {
   /** The merged result, in the server's shape. */
   value: unknown;
-  /** `tools/call` requests sent, the failed one included. */
+  /** Pages requested, the failed one included: one per page however many times it was sent. */
   callsMade: number;
+  /** `tools/call` re-sends across all pages (transport retries and governance re-sends). */
+  retries: number;
   callsWithoutCost: number;
   /** The sum of reported costs, or null when no call reported one. */
   creditCost: number | null;
@@ -96,6 +102,7 @@ interface Tracker {
 
 interface Accounting {
   callsMade: number;
+  retries: number;
   callsWithoutCost: number;
   creditSum: number;
 }
@@ -117,7 +124,7 @@ function unexpected(tool: McpTool, what: string): HgiError {
 }
 
 class Pager {
-  readonly acc: Accounting = { callsMade: 0, callsWithoutCost: 0, creditSum: 0 };
+  readonly acc: Accounting = { callsMade: 0, retries: 0, callsWithoutCost: 0, creditSum: 0 };
   private readonly pageSize: number | undefined;
 
   constructor(private readonly ctx: PagingContext) {
@@ -133,31 +140,46 @@ class Pager {
     if (!first && budget) await checkBudget(budget.id, budget.max);
     if (!first && this.ctx.validate) assertValidInput(tool, args);
     this.acc.callsMade += 1;
-    let result: CallToolResult;
+    const sendsBefore = session.state.toolsCallSends;
+    const governanceRetries = this.ctx.governance?.retries ?? 0;
+    let sent: SendOutcome;
     try {
-      result = await session.callTool(tool.name, args);
+      sent = await sendWithRetry(session, tool.name, args, {
+        retries: governanceRetries,
+        budgetMs: this.ctx.governance?.budgetMs ?? 0,
+        // Every attempt that came back: one ledger row, and its spend under a run cap.
+        record: async (r) => {
+          await this.ctx.onResult?.(r);
+          if (!budget) return null;
+          try {
+            await recordSpend(budget.id, budget.max, creditCostOf(r));
+            return null;
+          } catch (err) {
+            return toHgiError(err);
+          }
+        },
+        beforeResend: budget ? async () => void (await checkBudget(budget.id, budget.max)) : undefined,
+        report: reportRetry,
+      });
     } catch (err) {
       this.acc.callsWithoutCost += 1;
       throw err;
+    } finally {
+      this.acc.retries += Math.max(0, session.state.toolsCallSends - sendsBefore - 1);
     }
+    const { result, attempts, budgetFailure } = sent;
+    // Refused attempts are not billed: the page's cost is its last result's.
     const cost = creditCostOf(result);
     if (cost === null) this.acc.callsWithoutCost += 1;
     else this.acc.creditSum += cost;
-    await this.ctx.onResult?.(result);
-    let budgetFailure: HgiError | null = null;
-    if (budget) {
-      try {
-        await recordSpend(budget.id, budget.max, cost);
-      } catch (err) {
-        budgetFailure = toHgiError(err);
-      }
-    }
     try {
       return { value: interpretResult(result, tool.name).value, budgetFailure };
     } catch (err) {
       // A server refusal stays the error the caller acts on; a failed budget write is only flagged on it.
-      if (budgetFailure && err instanceof HgiError) {
-        throw new HgiError(err.code, err.message, { hint: err.hint, details: { ...err.details, budget_write_failed: true }, cause: err });
+      const retried = governanceRetries > 0 && err instanceof HgiError && err.code === 'governance_unavailable';
+      if ((budgetFailure || retried) && err instanceof HgiError) {
+        const extra = { ...(budgetFailure ? { budget_write_failed: true } : {}), ...(retried ? { attempts } : {}) };
+        throw new HgiError(err.code, err.message, { hint: err.hint, details: { ...err.details, ...extra }, cause: err });
       }
       throw err;
     }
@@ -352,7 +374,7 @@ async function pageItems(p: Pager, ctx: PagingContext, first: unknown): Promise<
 
 /**
  * Fetches every page, one at a time, and merges them. A failure on page 1 is thrown exactly as a single call's;
- * a failure after it is returned in `failure`, with the merged result so far. Never retries a sent call.
+ * a failure after it is returned in `failure`, with the merged result so far. Never retries a call that may have run.
  */
 export async function runAllPages(ctx: PagingContext): Promise<PagedOutcome> {
   const p = new Pager(ctx);
@@ -360,6 +382,7 @@ export async function runAllPages(ctx: PagingContext): Promise<PagedOutcome> {
   const outcome = (value: unknown, failure?: HgiError): PagedOutcome => ({
     value,
     callsMade: p.acc.callsMade,
+    retries: p.acc.retries,
     callsWithoutCost: p.acc.callsWithoutCost,
     creditCost: p.creditCost(),
     ...(failure ? { failure } : {}),

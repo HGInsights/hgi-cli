@@ -3,7 +3,7 @@ import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { makeSandbox, runCli, type CliResult, type Sandbox } from '../support/cli.js';
 import { errorBody, login, seedServer } from '../support/e2e.js';
-import { FakeServer, textResult } from '../support/fake-server.js';
+import { FakeServer, textResult, type ToolResult } from '../support/fake-server.js';
 import {
   BATCH_TOOL,
   CREDIT_LIMIT,
@@ -264,6 +264,7 @@ describe('Story 3: a failure does not throw away what was paid for', () => {
       credit_cost: 2,
       mcp_version: 'v2',
       pages_fetched: 3,
+      retries: 0,
       calls_without_cost: 1,
     });
   });
@@ -389,5 +390,43 @@ describe('Story 4: refused up front, nothing sent', () => {
     const error = expectError(await runCli(['call', 'company_widgets', '--all-pages', '--ids', `@${ids}`], sb.env), 2, 'invalid_input');
     expect(error.details?.reason).toBe('all_pages_with_ids');
     expect(server.toolCalls()).toEqual([]);
+  });
+});
+
+describe('issue #32: --retries with --all-pages', () => {
+  const GOVERNANCE: ToolResult = {
+    isError: true,
+    content: [{ type: 'text', text: 'Budget service down.' }],
+    _meta: { errorCode: 'governance_unavailable' },
+  };
+
+  it('a page that gets governance_unavailable once is re-sent; --meta counts pages and retries apart', async () => {
+    server.handlers.set('list_widgets', topHandler({ rows: 7, cost: 2, special: { 2: GOVERNANCE } }));
+    const res = await call('list_widgets', {}, ['--all-pages', '--retries', '2', '--meta']);
+    const meta = json(res);
+    expect(meta).toMatchObject({ credit_cost: 6, pages_fetched: 3, retries: 1, calls_without_cost: 0 });
+    expect(ns((meta.result as Record<string, unknown>).widgets)).toEqual(range(7));
+    expect(sentArgs().map((a) => a.offset)).toEqual([undefined, 3, 3, 6]);
+    const retryLines = res.stderr.split('\n').filter((l) => l.includes('"retry"'));
+    expect(retryLines).toHaveLength(1);
+    expect(JSON.parse(retryLines[0] ?? '{}')).toMatchObject({ retry: { code: 'governance_unavailable', attempt: 1, max: 2 } });
+  });
+
+  it('when a later page runs out of governance retries: the pages so far, exit 7 with attempts and partial_result', async () => {
+    server.handlers.set('list_widgets', topHandler({ rows: 30, special: { 2: GOVERNANCE, 3: GOVERNANCE } }));
+    const res = await call('list_widgets', {}, ['--all-pages', '--retries', '1']);
+    const error = expectError(res, 7, 'governance_unavailable');
+    expect(error.details).toMatchObject({ retryable: true, attempts: 2, partial_result: true, pages_fetched: 2 });
+    expect(server.toolCalls()).toHaveLength(3);
+    const out = JSON.parse(res.stdout) as Record<string, unknown>;
+    expect(ns(out.widgets)).toEqual(range(3));
+    expect(out).toMatchObject({ truncated: true, truncated_reason: 'governance_unavailable' });
+  });
+
+  it('without --retries a page is not re-sent on governance_unavailable', async () => {
+    server.handlers.set('list_widgets', topHandler({ rows: 30, special: { 2: GOVERNANCE } }));
+    const res = await call('list_widgets', {}, ['--all-pages']);
+    expectError(res, 7, 'governance_unavailable');
+    expect(server.toolCalls()).toHaveLength(2);
   });
 });
