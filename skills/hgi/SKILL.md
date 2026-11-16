@@ -38,6 +38,7 @@ hgi call company_enrich --input '{"domain":"acme.com"}' # lookup, JSON on stdout
 hgi call search_companies --input '{"query":"saas"}' --select name,domain -f csv
 hgi call <tool> --input '{"limit":100}' --out result.json        # big result to a new file
 hgi call <tool> --ids @hg_ids.txt --input '{...}'        # a whole list: one JSONL row per line
+hgi call <tool> --ids @hg_ids.txt --all-pages            # a whole list, every page per company
 hgi call <tool> --all-pages --input '{...}'              # every page of an offset-paged tool, merged
 hgi run <tool> --input '{...}'                           # only after the user approves
 ```
@@ -59,7 +60,7 @@ For every row of an offset-paged tool, use `hgi call <tool> --all-pages` instead
 - It stops on `has_more: false`, an empty or short page, or the total reached, never on `has_more: true` alone (the server can say `true` after the last row). `--max-pages <n>` caps pages per page object (default 10, page 1 included).
 - The result keeps the server's shape. Each page object (the result, or each `companies[]` entry) gets `pages_fetched`; one cut short says `truncated: true` and `truncated_reason`: `max_pages`, `unmatched` (a batch entry hgi could not tie to one input, so it never guesses) or the code of the call that failed. Report truncated parts as incomplete.
 - One credit line at the end with the sum. `--meta` adds `pages_fetched` (pages requested), `retries` (re-sends) and `calls_without_cost`.
-- Not with `--ids` (exit 2 `all_pages_with_ids`): page one company list at a time.
+- With `--ids`: each batch is sent as usual, then every unfinished company is paged on its own (`--max-pages` per company), and each row's `result` is that company's merged entry. A tool error on a follow-up truncates only that row (`truncated_reason: "tool_error"`, exit 3 at the end); any other failure stops the run with the rows so far printed and `details.partial_result: true`. `--meta`'s stderr summary adds `truncated_rows`.
 
 ## Recipes
 
@@ -164,7 +165,7 @@ Not null, but easy to misread:
 | 10 | wrong verb | use the verb the error names |
 | 11 | forbidden, or `tool_not_enabled_for_team` | the account, organization or team lacks access to this tool; stop and tell the user to ask an admin |
 | 12 | local credential or file problem | follow the hint. If `details.tool_ran` is `true`, the tool already ran and its result is on stdout: do not re-run it |
-| any, with `details.partial_result: true` | `--all-pages` stopped on a later page; the pages fetched so far are on stdout (or `--out`), unfinished parts marked `truncated` | keep them, they were billed; then act on the code as its own row says. Don't re-fetch pages you already have |
+| any, with `details.partial_result: true` | `--all-pages` stopped on a later page; the pages fetched so far are on stdout (or `--out`), unfinished parts marked `truncated`. With `--ids`, the rows so far, the last one possibly `truncated` (`rows_emitted`, `calls_made`) | keep them, they were billed; then act on the code as its own row says. Don't re-fetch pages you already have |
 | 13 `budget_exceeded` | the run spent its `--max-credits` cap; nothing more was sent (with `--ids`, keep the rows already printed) | stop; tell the user what was spent (`details.spent` of `details.max`). Only the user raises the cap or runs `hgi budget reset` |
 
 Errors are JSON on stderr when it is not a terminal: `{"schema":1,"error":{"code","exit_code","message","hint","details"}}`. Branch on `error.code`, not on the message.

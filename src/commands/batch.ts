@@ -5,6 +5,8 @@ import { HgiError, toHgiError } from '../errors.js';
 import { parseCsvColumn, parseIdLines, type IdLine } from '../batch/ids.js';
 import { batchFields, buildBatches, entriesKey, matchEntries, type Batch, type BatchPlan, type UniqueInput } from '../batch/plan.js';
 import { creditCostOf, interpretResult } from '../mcp/result.js';
+import type { PagingSpec } from '../mcp/paging.js';
+import { isRecord } from '../mcp/schema-shape.js';
 import type { McpSession } from '../mcp/session.js';
 import type { McpTool } from '../mcp/tools.js';
 import { assertValidInput } from '../mcp/validate.js';
@@ -16,6 +18,7 @@ import { writeStream } from '../output/stdout.js';
 import { redact } from '../redact.js';
 import { emitText } from './emit.js';
 import { readStdin, reportCredit, reportRetry } from './io.js';
+import { companyPager, type CompanyPager } from './paging.js';
 import { sendWithRetry } from './retry.js';
 
 export interface BatchFlags {
@@ -38,6 +41,8 @@ export interface BatchOptions {
   onResult?: (result: CallToolResult) => Promise<void>;
   /** `governance_unavailable` re-sends per batch call (0: none) and their wait budget. */
   governance?: { retries: number; budgetMs: number };
+  /** `--all-pages`: page every company of each batch on its own (see docs/output-formats.md). */
+  paging?: { spec: PagingSpec; maxPages: number };
 }
 
 interface RowError {
@@ -113,11 +118,16 @@ class Run {
   callsWithoutCost = 0;
   creditSum = 0;
   failedBatches = 0;
+  /** `--all-pages`: companies whose paging a tool error ended early. */
+  pagingFailures = 0;
+  /** `--all-pages`: rows whose result is marked truncated. */
+  truncatedRows = 0;
 
   constructor(
     readonly plan: BatchPlan,
     readonly format: Format,
     readonly streaming: boolean,
+    readonly paging = false,
   ) {}
 
   /** Emits every row, in input order, whose batch has returned. */
@@ -128,6 +138,7 @@ class Run {
       if (!outcome) return;
       const row: Row = 'result' in outcome ? { input: line.text, result: applySelect(outcome.result, select) } : { input: line.text, error: outcome.error };
       if ('error' in row) this.rowErrors += 1;
+      else if ('result' in outcome && isRecord(outcome.result) && outcome.result.truncated === true) this.truncatedRows += 1;
       this.rows.push(row);
       this.cursor += 1;
       if (this.streaming) {
@@ -151,6 +162,11 @@ class Run {
     this.failedBatches += 1;
     for (const u of batch.items) this.outcomes.set(u, { error });
   }
+}
+
+/** A failure that becomes a row error (or a truncated row) while the run goes on. Anything else stops the run. */
+function isRowFailure(err: HgiError): boolean {
+  return err.code === 'tool_error' && err.details?.outcome_unknown !== true && err.details?.budget_write_failed !== true;
 }
 
 function rowError(code: string, message: string): RowError {
@@ -210,7 +226,7 @@ async function callBatch(
   } catch (raw) {
     if (!result) run.addCost(undefined);
     const err = toHgiError(raw);
-    if (err.code !== 'tool_error' || err.details?.outcome_unknown === true) {
+    if (!isRowFailure(err)) {
       // A server refusal stays the error the caller acts on; a failed budget write is only flagged on it.
       const retried = governanceRetries > 0 && err.code === 'governance_unavailable';
       if (budgetFailure || retried) {
@@ -231,14 +247,28 @@ async function checkBatchBudget(budget: NonNullable<BatchOptions['budget']>, run
   try {
     await checkBudget(budget.id, budget.max);
   } catch (raw) {
-    const err = toHgiError(raw);
-    if (err.code !== 'budget_exceeded') throw err;
-    throw new HgiError(err.code, err.message, {
-      hint: `${run.callsMade} batch call(s) already ran and their rows were printed; nothing more was sent. Keep those rows, raise --max-credits or run \`hgi budget reset\`, then resume from the rest.`,
-      details: err.details,
-      cause: err,
-    });
+    throw capReached(toHgiError(raw), run);
   }
+}
+
+/** The run cap stopped the run: says the rows so far were printed. Any other error is returned as it is. */
+function capReached(err: HgiError, run: Run): HgiError {
+  if (err.code !== 'budget_exceeded') return err;
+  const calls = run.paging ? 'call(s)' : 'batch call(s)';
+  return new HgiError(err.code, err.message, {
+    hint: `${run.callsMade} ${calls} already ran and their rows were printed; nothing more was sent. Keep those rows, raise --max-credits or run \`hgi budget reset\`, then resume from the rest.`,
+    details: err.details,
+    cause: err,
+  });
+}
+
+/** A call ran but its spend could not be recorded under the run cap: exit 12 `budget_write_failed`, `tool_ran`. */
+function budgetWriteFailed(budgetFailure: HgiError, what: string): HgiError {
+  return new HgiError('local_state_error', `The ${what} ran, but ${budgetFailure.message.replace(/^Could not/, 'hgi could not')}`, {
+    hint: 'Every call so far already ran and was billed, and its rows were printed. Do NOT re-run them. Check the budget with `hgi budget status`.',
+    details: { kind: 'budget_write_failed', tool_ran: true },
+    cause: budgetFailure,
+  });
 }
 
 function printMeta(run: Run): void {
@@ -248,6 +278,7 @@ function printMeta(run: Run): void {
       retries: run.retries,
       rows: run.rows.length,
       row_errors: run.rowErrors,
+      ...(run.paging ? { truncated_rows: run.truncatedRows } : {}),
       credit_cost: run.creditCost(),
       calls_without_cost: run.callsWithoutCost,
     })}\n`,
@@ -282,6 +313,92 @@ function withProgress(details: Record<string, unknown> | undefined, run: Run, ex
   return { ...details, rows_emitted: run.rows.length, calls_made: run.callsMade, ...extra };
 }
 
+interface Driver {
+  run: Run;
+  session: McpSession;
+  tool: McpTool;
+  input: Record<string, unknown>;
+  key: string;
+  opts: BatchOptions;
+}
+
+/** Sends batch `i` as `--ids` sends it: the run cap checked first (except on the first call), then the call. */
+async function sendBatch(d: Driver, i: number): Promise<HgiError | null> {
+  const { run, opts } = d;
+  const batch = run.plan.batches[i] as Batch;
+  if (opts.budget && i > 0) await checkBatchBudget(opts.budget, run);
+  if (process.stderr.isTTY) process.stderr.write(`hgi: batch ${i + 1}/${run.plan.batches.length}\n`);
+  return callBatch(run, d.session, d.tool, d.input, batch, d.key, opts);
+}
+
+/** `--ids` alone: batches in order, each batch's rows printed as it returns. */
+async function runBatches(d: Driver): Promise<void> {
+  for (const i of d.run.plan.batches.keys()) {
+    const budgetFailure = await sendBatch(d, i);
+    await d.run.flush(d.opts.select);
+    if (budgetFailure) throw budgetWriteFailed(budgetFailure, 'batch call');
+  }
+}
+
+/**
+ * `--ids` with `--all-pages`, driven by input order: each company's batch is sent (whole, as `--ids` sends it) when
+ * its first company is reached, then that company is paged on its own. So the company being paged is always the
+ * next row due, and its row is printed even when a failure stops the run.
+ */
+async function runPagedBatches(d: Driver, pager: CompanyPager): Promise<void> {
+  const { run, opts } = d;
+  const batchOf = new Map<UniqueInput, number>();
+  run.plan.batches.forEach((b, i) => b.items.forEach((u) => batchOf.set(u, i)));
+  const sent = new Set<number>();
+  // Every page-1 outcome, errors included, waits here until its company is reached, so a stop never prints a
+  // row for a company the run did not reach.
+  const pending = new Map<UniqueInput, Outcome>();
+  const reached = new Set<UniqueInput>();
+  for (const { unique: u } of run.plan.lines) {
+    if (reached.has(u)) continue;
+    reached.add(u);
+    const i = batchOf.get(u) as number;
+    const batch = run.plan.batches[i] as Batch;
+    if (!sent.has(i)) {
+      sent.add(i);
+      const budgetFailure = await sendBatch(d, i);
+      for (const item of batch.items) {
+        const outcome = run.outcomes.get(item);
+        if (!outcome) continue;
+        run.outcomes.delete(item);
+        pending.set(item, outcome);
+      }
+      if (budgetFailure) {
+        // No follow-up once spend can't be recorded: every company not yet paged keeps page 1, as `--ids` prints it.
+        for (const [item, outcome] of pending) {
+          run.outcomes.set(item, 'result' in outcome && isRecord(outcome.result) ? { result: pager.settle(outcome.result, 'local_state_error') } : outcome);
+        }
+        await run.flush(opts.select);
+        throw budgetWriteFailed(budgetFailure, 'batch call');
+      }
+    }
+    const outcome = pending.get(u);
+    if (!outcome) continue;
+    pending.delete(u);
+    if (!('result' in outcome) || !isRecord(outcome.result)) {
+      // A row error from page 1 (not_found, a failed batch): nothing to page.
+      run.outcomes.set(u, outcome);
+      await run.flush(opts.select);
+      continue;
+    }
+    const { merged, failure } = await pager.page(outcome.result, { field: batch.field, text: u.text, kind: u.kind, norm: u.norm });
+    run.outcomes.set(u, { result: merged });
+    await run.flush(opts.select);
+    if (!failure) continue;
+    if (isRowFailure(failure)) {
+      run.pagingFailures += 1;
+      continue;
+    }
+    if (failure.code === 'local_state_error' && failure.details?.kind === 'budget_write_failed') throw budgetWriteFailed(failure, 'follow-up page');
+    throw capReached(failure, run);
+  }
+}
+
 export async function runBatch(session: McpSession, tool: McpTool, input: Record<string, unknown>, lines: IdLine[], opts: BatchOptions): Promise<void> {
   const plan = buildBatches(lines, batchFields(tool), opts.batchSize);
   if (opts.validate) {
@@ -298,22 +415,26 @@ export async function runBatch(session: McpSession, tool: McpTool, input: Record
     });
   }
   const format = opts.format ? parseFormat(opts.format) : 'jsonl';
-  const run = new Run(plan, format, format === 'jsonl' && !opts.out);
-  const key = entriesKey(tool);
+  const run = new Run(plan, format, format === 'jsonl' && !opts.out, opts.paging !== undefined);
+  const driver: Driver = { run, session, tool, input, key: entriesKey(tool), opts };
 
   try {
-    for (const [i, batch] of plan.batches.entries()) {
-      if (opts.budget && i > 0) await checkBatchBudget(opts.budget, run);
-      if (process.stderr.isTTY) process.stderr.write(`hgi: batch ${i + 1}/${plan.batches.length}\n`);
-      const budgetFailure = await callBatch(run, session, tool, input, batch, key, opts);
-      await run.flush(opts.select);
-      if (budgetFailure) {
-        throw new HgiError('local_state_error', `The batch call ran, but ${budgetFailure.message.replace(/^Could not/, 'hgi could not')}`, {
-          hint: 'Every call so far already ran and was billed, and its rows were printed. Do NOT re-run them. Check the budget with `hgi budget status`.',
-          details: { kind: 'budget_write_failed', tool_ran: true },
-          cause: budgetFailure,
-        });
-      }
+    if (opts.paging) {
+      const { spec, maxPages } = opts.paging;
+      const pagingCtx = {
+        session,
+        tool,
+        input,
+        spec,
+        maxPages,
+        validate: opts.validate,
+        budget: opts.budget,
+        onResult: opts.onResult,
+        governance: opts.governance,
+      };
+      await runPagedBatches(driver, companyPager(pagingCtx, run));
+    } else {
+      await runBatches(driver);
     }
   } catch (raw) {
     const err = toHgiError(raw);
@@ -327,7 +448,7 @@ export async function runBatch(session: McpSession, tool: McpTool, input: Record
     if (opts.meta) printMeta(run);
     throw new HgiError(err.code, err.message, {
       hint: err.hint,
-      details: withProgress(err.details, run, outFailed ? { out_write_failed: true } : {}),
+      details: withProgress(err.details, run, { ...(run.paging ? { partial_result: true } : {}), ...(outFailed ? { out_write_failed: true } : {}) }),
       cause: err,
     });
   }
@@ -346,10 +467,18 @@ export async function runBatch(session: McpSession, tool: McpTool, input: Record
       cause: outError,
     });
   }
+  if (run.pagingFailures > 0) {
+    const batches = run.failedBatches > 0 ? `${run.failedBatches} of ${plan.batches.length} batch calls failed, and ` : '';
+    const companies = `${run.pagingFailures} ${run.pagingFailures === 1 ? 'company' : 'companies'}`;
+    throw new HgiError('tool_error', `${batches}paging stopped early on a tool error for ${companies}.`, {
+      hint: 'Every row was printed. Rows with truncated_reason "tool_error" hold the pages fetched before the error; rows with an error hold none. Re-run only those inputs.',
+      details: withProgress({ failed_batches: run.failedBatches, paging_failures: run.pagingFailures }, run),
+    });
+  }
   if (run.failedBatches > 0) {
     throw new HgiError('tool_error', `${run.failedBatches} of ${plan.batches.length} batch calls failed; their rows carry the error.`, {
       hint: 'Every other row was printed. Re-run only the inputs whose rows have an error.',
-      details: withProgress({ failed_batches: run.failedBatches }, run),
+      details: withProgress({ failed_batches: run.failedBatches, ...(run.paging ? { paging_failures: 0 } : {}) }, run),
     });
   }
 }

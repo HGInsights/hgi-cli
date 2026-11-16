@@ -38,7 +38,6 @@ export function preflightPaging(flags: PagingFlags, input: Record<string, unknow
     if (!Number.isSafeInteger(n) || n < 1) throw usage(`--max-pages must be a whole number of at least 1, not "${flags.maxPages}".`, 'bad_max_pages');
     maxPages = n;
   }
-  if (flags.ids !== undefined) throw usage('--all-pages cannot be combined with --ids yet.', 'all_pages_with_ids');
   if (Object.hasOwn(input, 'offset')) throw usage('--all-pages sets "offset" itself; remove it from --input.', 'offset_with_all_pages');
   return maxPages;
 }
@@ -49,6 +48,19 @@ export function assertPageable(tool: McpTool): PagingSpec {
   if (spec) return spec;
   throw new HgiError('invalid_input', `${tool.name} cannot be paged safely with --all-pages.`, {
     hint: 'Its schema has no integer "offset" input, or its output has no single rows array with has_more or a total. Nothing was sent. Page it yourself with --input.',
+    details: { reason: 'not_pageable', tool: tool.name },
+  });
+}
+
+/**
+ * With `--ids`: the paging rule, when the tool's page objects are the items of the same array `--ids` reads its
+ * rows from. Otherwise exit 2 `not_pageable` before anything is sent.
+ */
+export function assertBatchPageable(tool: McpTool, entriesKey: string): PagingSpec {
+  const spec = assertPageable(tool);
+  if (spec.kind === 'items' && spec.itemsKey === entriesKey) return spec;
+  throw new HgiError('invalid_input', `${tool.name} cannot be paged safely with --ids and --all-pages.`, {
+    hint: `Its page objects are not the items of "${entriesKey}", the array --ids reads its rows from. Nothing was sent. Use --ids without --all-pages, or --all-pages without --ids.`,
     details: { reason: 'not_pageable', tool: tool.name },
   });
 }
@@ -100,7 +112,8 @@ interface Tracker {
   expect?: { kind: IdKind; norm: string };
 }
 
-interface Accounting {
+/** Calls and credits, shared with `--ids` when it drives the paging. */
+export interface Accounting {
   callsMade: number;
   retries: number;
   callsWithoutCost: number;
@@ -124,10 +137,12 @@ function unexpected(tool: McpTool, what: string): HgiError {
 }
 
 class Pager {
-  readonly acc: Accounting = { callsMade: 0, retries: 0, callsWithoutCost: 0, creditSum: 0 };
   private readonly pageSize: number | undefined;
 
-  constructor(private readonly ctx: PagingContext) {
+  constructor(
+    private readonly ctx: PagingContext,
+    readonly acc: Accounting = { callsMade: 0, retries: 0, callsWithoutCost: 0, creditSum: 0 },
+  ) {
     this.pageSize = pageSizeOf(ctx.spec, ctx.input);
   }
 
@@ -333,6 +348,31 @@ async function pageTop(p: Pager, ctx: PagingContext, first: unknown): Promise<un
   return p.merged(t);
 }
 
+/** Follows up one batch entry until its stop rule fires. Every follow-up must return exactly that one company. */
+async function followCompany(p: Pager, ctx: PagingContext, t: Tracker): Promise<void> {
+  const itemsKey = ctx.spec.itemsKey as string;
+  while (!t.done) {
+    const follow = t.follow as NonNullable<Tracker['follow']>;
+    const args =
+      follow === 'same'
+        ? { ...ctx.input, offset: t.rows?.length ?? 0 }
+        : { ...withoutCompanies(ctx.input), [follow.field]: [follow.text], offset: t.rows?.length ?? 0 };
+    const page = await p.fetchLater(args);
+    if (!isRecord(page.value) || !Array.isArray(page.value[itemsKey])) {
+      throw new StopPaging(unexpected(ctx.tool, `a "${itemsKey}" array`));
+    }
+    const list = page.value[itemsKey] as unknown[];
+    const only = list.length === 1 && isRecord(list[0]) ? list[0] : null;
+    const want = follow === 'same' ? t.expect : follow;
+    if (only === null || (want !== undefined && !matches(only, want))) {
+      Object.assign(t, { done: true, reason: 'unmatched' });
+    } else {
+      p.append(t, only);
+    }
+    if (page.budgetFailure) throw new StopPaging(page.budgetFailure);
+  }
+}
+
 async function pageItems(p: Pager, ctx: PagingContext, first: unknown): Promise<unknown> {
   const itemsKey = ctx.spec.itemsKey as string;
   if (!isRecord(first) || !Array.isArray(first[itemsKey])) return first;
@@ -341,28 +381,7 @@ async function pageItems(p: Pager, ctx: PagingContext, first: unknown): Promise<
   planFollowUps(trackers, ctx.input);
   const merge = () => ({ ...first, [itemsKey]: entries.map((e, i) => (trackers[i] ? p.merged(trackers[i] as Tracker) : e)) });
   try {
-    for (const t of trackers) {
-      while (t && !t.done) {
-        const follow = t.follow as NonNullable<Tracker['follow']>;
-        const args =
-          follow === 'same'
-            ? { ...ctx.input, offset: t.rows?.length ?? 0 }
-            : { ...withoutCompanies(ctx.input), [follow.field]: [follow.text], offset: t.rows?.length ?? 0 };
-        const page = await p.fetchLater(args);
-        if (!isRecord(page.value) || !Array.isArray(page.value[itemsKey])) {
-          throw new StopPaging(unexpected(ctx.tool, `a "${itemsKey}" array`));
-        }
-        const list = page.value[itemsKey] as unknown[];
-        const only = list.length === 1 && isRecord(list[0]) ? list[0] : null;
-        const want = follow === 'same' ? t.expect : follow;
-        if (only === null || (want !== undefined && !matches(only, want))) {
-          Object.assign(t, { done: true, reason: 'unmatched' });
-        } else {
-          p.append(t, only);
-        }
-        if (page.budgetFailure) throw new StopPaging(page.budgetFailure);
-      }
-    }
+    for (const t of trackers) if (t) await followCompany(p, ctx, t);
   } catch (err) {
     if (!(err instanceof StopPaging)) throw err;
     for (const t of trackers) if (t && !t.done) Object.assign(t, { done: true, reason: err.error.code });
@@ -370,6 +389,53 @@ async function pageItems(p: Pager, ctx: PagingContext, first: unknown): Promise<
     throw err;
   }
   return merge();
+}
+
+/** One company of an `--ids` batch, as the caller wrote it. */
+export interface CompanyInput {
+  field: 'hg_ids' | 'domains';
+  text: string;
+  kind: IdKind;
+  norm: string;
+}
+
+export interface CompanyPager {
+  /**
+   * Pages one company of a batch whose page 1 already came back as `entry`. Follow-ups name only `company`.
+   * Never throws for a follow-up failure: the merged entry so far comes back marked `truncated_reason: <code>`,
+   * with the failure, and the caller decides what the failure means for the run.
+   */
+  page(entry: Record<string, unknown>, company: CompanyInput): Promise<{ merged: Record<string, unknown>; failure?: HgiError }>;
+  /** Page 1 only, sending nothing: marked `truncated_reason: reason` when its stop rule had not fired. */
+  settle(entry: Record<string, unknown>, reason: string): Record<string, unknown>;
+}
+
+/**
+ * `--ids` with `--all-pages`: pages each company of a batch on its own. `ctx.input` holds no `hg_ids`/`domains`;
+ * calls and credits are added to `acc`. Follow-ups are checked against the run cap, validated, recorded in the
+ * ledger and counted under the cap exactly as `--all-pages` alone does.
+ */
+export function companyPager(ctx: PagingContext, acc: Accounting): CompanyPager {
+  const p = new Pager(ctx, acc);
+  return {
+    async page(entry, company) {
+      const t = p.track(entry);
+      t.follow = { ...company };
+      try {
+        await followCompany(p, ctx, t);
+        return { merged: p.merged(t) };
+      } catch (err) {
+        if (!(err instanceof StopPaging)) throw err;
+        if (!t.done) Object.assign(t, { done: true, reason: err.error.code });
+        return { merged: p.merged(t), failure: err.error };
+      }
+    },
+    settle(entry, reason) {
+      const t = p.track(entry);
+      if (!t.done) Object.assign(t, { done: true, reason });
+      return p.merged(t);
+    },
+  };
 }
 
 /**
