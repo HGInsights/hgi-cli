@@ -7,7 +7,7 @@ Every failure has its own exit code, so a script can branch without parsing Engl
 | 0 | | success |
 | 1 | `internal_error` | a bug in `hgi`. Never used for a server response or a usage error |
 | 2 | `invalid_input` | bad flags or usage; invalid JSON; input that fails the tool's schema; unknown tool; unreadable `--input @file` or `--ids @file`; `--out` refusals (exists, symlink, protected path, `--force` on `call`); config-dir or `HGI_LEDGER` workspace guard (`workspace_guard`); a bad `--label` (`bad_label`), `hgi usage --since` (`bad_since`) or `--by` (`bad_by`); any `--ids` refusal (see [below](#partial-output-from---ids)); any `--all-pages` refusal, `not_pageable` among them (see [below](#partial-output-from---all-pages)). Nothing is sent |
-| 3 | `tool_error` | the tool returned `isError` (including server-side invalid arguments, which the server reports in-band), a JSON-RPC error, or a response `hgi` could not parse after the call was sent. With `--ids`: at least one batch call failed (every row is printed first) |
+| 3 | `tool_error` | the tool returned `isError` (including server-side invalid arguments, which the server reports in-band), a JSON-RPC error, or a response `hgi` could not parse after the call was sent. With `--ids`: at least one batch call failed, or (with `--all-pages`) a follow-up page failed for at least one company (every row is printed first) |
 | 4 | `login_required`, `login_expired`, `phoenix_account_required` | no credentials; a second 401 after one refresh; the refresh token was rejected (`invalid_grant`). `phoenix_account_required`: the server says the signed-in identity has no Phoenix account; sign up, or sign in with `hgi auth login` as an account that has one |
 | 5 | `rate_limited` | 429 after bounded retries (MCP calls: 3 by default, `--retries` to change; see [Retries](#retries)), or a `Retry-After` longer than what is left of the retry budget; `details.attempts` says how many times the request was sent. A 429 from the userinfo or revoke endpoint exits at once |
 | 6 | `credit_limit_exceeded`, `user_credit_limit_exceeded` | the server refused the call: your organization's credit allowance (`credit_limit_exceeded`) or your personal credit budget (`user_credit_limit_exceeded`) is used up. Retrying will not help; ask an admin, or wait for the next billing period |
@@ -57,6 +57,12 @@ On a terminal, errors are plain text with a hint.
 - **Any other code stops the run at once** (out of credits, sign-in expired, rate limited, unreachable, proxy/TLS, forbidden, a failure with `outcome_unknown: true`, and any later client-side stop): no further batch is sent and nothing is retried. The rows already printed stay on stdout (for `-f json|csv|yaml|table` and `--out`, the rows so far are written before the error). `details` adds `rows_emitted` (rows printed, in input order) and `calls_made` (`tools/call` requests attempted, including the one that failed), so you know where to resume. If `--out` cannot be written at that point, the rows go to stdout instead and `details.out_write_failed` is `true`; the exit code is still the original one.
 - **12 with `details.tool_ran: true`**: every call ran, but `--out` could not be written at the end; the rows are on stdout. Do not re-run.
 
+**With `--all-pages` too** ([output formats](output-formats.md#--ids-with---all-pages)), both partial-result rules apply, per company:
+
+- A follow-up page that fails with a tool error (the exit-3 class above) ends paging for **that company only**: its row keeps the pages fetched before it, marked `truncated: true, truncated_reason: "tool_error"`, and the run goes on. The run ends with exit 3, `details.paging_failures` (companies cut short this way) next to `failed_batches`, `rows_emitted` and `calls_made`.
+- Any other failure, on a batch call or a follow-up page, stops the run at once, as above. The rows already printed stay; the company that was being paged gets its row, with the pages fetched so far and `truncated_reason: "<error.code>"`; companies not reached yet get no row. `details` adds `partial_result: true` (as with [`--all-pages`](#partial-output-from---all-pages)) next to `rows_emitted` and `calls_made`, and the exit code is the error's own.
+- When a batch call's spend cannot be recorded under a run cap, no follow-up page is sent: that batch's rows are printed with page 1 only (unfinished companies marked `truncated_reason: "local_state_error"`), then exit 12 `budget_write_failed` with `tool_ran: true` and `partial_result: true`.
+
 Exit 2 refusals specific to `--ids`, each before anything is sent (`details.reason`):
 
 | `reason` | When |
@@ -87,11 +93,10 @@ Exit 2 refusals specific to `--all-pages`, each before anything is sent (`detail
 
 | `reason` | When |
 |---|---|
-| `not_pageable` | the tool's schemas don't show it can be paged safely: no integer `offset` input, or no output object with exactly one rows array plus `has_more`/`hasMore` or a total (`details.tool`) |
+| `not_pageable` | the tool's schemas don't show it can be paged safely: no integer `offset` input, or no output object with exactly one rows array plus `has_more`/`hasMore` or a total (`details.tool`). With `--ids`, also when the page objects are not the items of the array `--ids` reads its rows from |
 | `max_pages_without_all_pages` | `--max-pages` without `--all-pages` |
 | `bad_max_pages` | `--max-pages` is not a whole number of at least 1 |
 | `offset_with_all_pages` | `--input` already has `offset`; `--all-pages` sets it |
-| `all_pages_with_ids` | `--all-pages` together with `--ids` |
 
 ## `outcome_unknown`
 
@@ -133,7 +138,7 @@ Success prints the tool result on stdout and the credit cost on stderr (`credit_
 - It covers `hgi call` only. `hgi run` has no `--max-credits`, ignores `HGI_MAX_CREDITS`, and is neither checked nor counted.
 - Before each capped call, `hgi` refuses with exit 13 when the budget has already spent its cap, and sends nothing. After the call, it adds the cost the server reported (`_meta.creditCost`), for error results too. A tool that reports no cost counts as 0 and is counted in `unknown_cost_calls`.
 - With `--all-pages`, every page is a capped call: checked before it is sent and counted after it. When the cap is reached partway, the next page is not sent, the pages so far are printed, and `hgi` exits 13 with `details.partial_result: true` ([above](#partial-output-from---all-pages)).
-- With `--ids`, every batch call is a capped call: checked before it is sent and counted after it. When the cap is reached partway, the run stops with exit 13 and the rows so far stay printed, with `rows_emitted` and `calls_made` as in [Partial output from `--ids`](#partial-output-from---ids). When a batch's spend cannot be recorded, its rows are printed first (to `--out` when given), then the run stops with exit 12 `budget_write_failed` and `details.tool_ran: true`.
+- With `--ids`, every batch call (and, with `--all-pages`, every follow-up page) is a capped call: checked before it is sent and counted after it. When the cap is reached partway, the run stops with exit 13 and the rows so far stay printed, with `rows_emitted` and `calls_made` as in [Partial output from `--ids`](#partial-output-from---ids). When a batch's spend cannot be recorded, its rows are printed first (to `--out` when given), then the run stops with exit 12 `budget_write_failed` and `details.tool_ran: true`.
 - The server gives no price before a call, so a run can overshoot its cap by the calls running at the same time: one call when calls run one after another, more when they run in parallel.
 - Spend is recorded only when a cap is set. It lives in `~/.config/hgi/budgets/` (see [security](security.md)); a file not updated for 7 days is deleted on the next budget write.
 - `hgi budget status [--max-credits <n>]` prints `{budget_id, spent, max, remaining, calls, unknown_cost_calls}`; `hgi budget reset` starts the count over. Neither needs a sign-in or sends anything.

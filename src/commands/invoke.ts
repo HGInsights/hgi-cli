@@ -17,7 +17,8 @@ import { applySelect } from '../output/select.js';
 import { emit, preflightOutput } from './emit.js';
 import { preflightBatchFlags, readIds, runBatch } from './batch.js';
 import { readStdin, reportCredit, reportRetry } from './io.js';
-import { assertPageable, preflightPaging, runAllPages, type PagingContext } from './paging.js';
+import { entriesKey } from '../batch/plan.js';
+import { assertBatchPageable, assertPageable, preflightPaging, runAllPages, type PagingContext } from './paging.js';
 import { resolveRetryOptions, type RetryOptions } from './retry-options.js';
 import { sendWithRetry } from './retry.js';
 
@@ -254,6 +255,8 @@ async function runInvoke(verb: Verb, toolName: string, opts: InvokeOptions, cmd:
     }
     assertVerb(verb, tool);
     if (ids) {
+      // With --all-pages, refused (exit 2) before the batches are checked and before anything is sent.
+      const paging = maxPages === null ? undefined : { spec: assertBatchPageable(tool, entriesKey(tool)), maxPages };
       await runBatch(session, tool, input, ids, {
         batchSize,
         format: opts.format,
@@ -264,6 +267,7 @@ async function runInvoke(verb: Verb, toolName: string, opts: InvokeOptions, cmd:
         budget: budgetId !== null && maxCredits !== null ? { id: budgetId, max: maxCredits } : undefined,
         onResult: recordUsage,
         governance,
+        paging,
       });
       return;
     }
@@ -369,7 +373,7 @@ export function registerInvokeCommands(program: Command): void {
             '  --max-credits <n> / HGI_MAX_CREDITS  refuse the call, sending nothing (exit 13), once this run has spent n credits',
             '  HGI_BUDGET_ID                        the run to count against (default: the parent process id, so one shell or script)',
             '  `hgi budget status` shows the spend; `hgi budget reset` starts it over.',
-            '  With --ids, every batch call is checked and counted.',
+            '  With --ids, every batch call (and, with --all-pages, every follow-up page) is checked and counted.',
             '',
             'Paging (--all-pages):',
             '  Only tools whose schemas show an integer "offset" input and a rows array with has_more or a total.',
@@ -378,6 +382,9 @@ export function registerInvokeCommands(program: Command): void {
             '  short page, the total reached, or --max-pages (default 10). A stopped-early part says',
             '  truncated: true and truncated_reason. A later-page failure prints the pages so far, then exits',
             "  with that failure's code and details.partial_result: true. The run cap is checked before every page.",
+            '  With --ids: each batch is sent as --ids sends it, then every unfinished company is paged on its own',
+            "  (--max-pages per company); each row's result is that company's merged entry. A tool error on a",
+            '  follow-up truncates only that row (exit 3 at the end); any other failure stops the run.',
           ].join('\n'),
         );
     }

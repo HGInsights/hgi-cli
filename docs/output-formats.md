@@ -112,7 +112,18 @@ Anything else is refused before anything is sent (exit 2, `details.reason: "not_
 
 With `--retries`, each page gets the same retries as a single `hgi call`, `governance_unavailable` re-sends included; a page whose retries run out stops paging like any later-page failure, with `details.attempts`.
 
-Without `--all-pages`, `--meta` is unchanged. `--all-pages` is not available with `--ids` or on `hgi run`.
+Without `--all-pages`, `--meta` is unchanged. `--all-pages` is not available on `hgi run`.
+
+### `--ids` with `--all-pages`
+
+`hgi call <batch tool> --ids @file --all-pages` batches first, then pages each company on its own, and prints the [`--ids` rows](#hgi-call---ids-batches) with every page in them:
+
+- Each batch is sent exactly as `--ids` sends it (page 1). Then every company of that batch whose stop rule has not fired is followed up, **one company per call** (`{"hg_ids": ["<id>"], "offset": n}` or `domains`, the other `--input` fields kept), with the same stop rule and matching as above. The tool's page objects must be the items of the array `--ids` reads its rows from, else exit 2 `not_pageable`.
+- Work goes in input order: a batch is sent when its first company is reached, then that company is paged. For a file of one kind that is batch 1, its follow-ups, batch 2, its follow-ups, and so on.
+- Each row's `result` is that company's **merged entry**: all its rows, `pages_fetched`, and `truncated: true` with `truncated_reason` when it was cut short (`max_pages`, `unmatched`, `tool_error`, or the code of the failure that stopped the run). Rows still stream in input order; a row is printed once its company has finished paging, so it may wait for the companies before it. A duplicate line repeats the same merged entry; the company is paged once.
+- `--max-pages` (default 10) applies per company.
+- A follow-up that fails with a tool error ends paging for that company only; the run goes on and ends with exit 3. Any other failure stops the run; see [exit codes](exit-codes.md#partial-output-from---ids).
+- One credit line at the end, the sum of every call. `--meta`'s summary counts follow-ups in `calls` and adds `truncated_rows` (rows whose `result` is marked truncated): `{"calls", "retries", "rows", "row_errors", "truncated_rows", "credit_cost", "calls_without_cost"}`. With `--retries`, follow-up pages get the same retries as batch calls; one whose retries run out is handled like any other follow-up failure.
 
 ## `hgi tools list`
 
